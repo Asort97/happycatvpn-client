@@ -142,28 +142,156 @@ List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpn
   
   if (config.domains.isEmpty) return rules;
 
-  final domains = config.domains.where((d) => !d.contains('/')).toList();
-  final ipCidrs = config.domains.where((d) => d.contains('/')).toList();
+  final targets = _RouteTargets.fromEntries(config.domains);
 
   if (config.mode == 'whitelist') {
     // Только указанные домены/IP через VPN, остальное direct
-    if (domains.isNotEmpty || ipCidrs.isNotEmpty) {
+    if (targets.hasDomainRules || targets.ipCidrs.isNotEmpty) {
       rules.add({
-        if (domains.isNotEmpty) 'domain': domains,
-        if (ipCidrs.isNotEmpty) 'ip_cidr': ipCidrs,
+        ...targets.toSingBoxFields(),
+        if (targets.ipCidrs.isNotEmpty) 'ip_cidr': targets.ipCidrs,
         'outbound': vpnTag,
       });
     }
   } else if (config.mode == 'blacklist') {
-    // Указанные домены/IP напрямую, остальное через VPN
-    if (domains.isNotEmpty || ipCidrs.isNotEmpty) {
+    if (targets.hasDomainRules || targets.ipCidrs.isNotEmpty) {
       rules.add({
-        if (domains.isNotEmpty) 'domain': domains,
-        if (ipCidrs.isNotEmpty) 'ip_cidr': ipCidrs,
+        ...targets.toSingBoxFields(),
+        if (targets.ipCidrs.isNotEmpty) 'ip_cidr': targets.ipCidrs,
         'outbound': 'direct',
       });
     }
   }
   
   return rules;
+}
+
+class _RouteTargets {
+  _RouteTargets({
+    required this.domainFull,
+    required this.domainSuffix,
+    required this.domainKeyword,
+    required this.domainRegex,
+    required this.geosite,
+    required this.ipCidrs,
+  });
+
+  final List<String> domainFull;
+  final List<String> domainSuffix;
+  final List<String> domainKeyword;
+  final List<String> domainRegex;
+  final List<String> geosite;
+  final List<String> ipCidrs;
+
+  bool get hasDomainRules => domainFull.isNotEmpty ||
+      domainSuffix.isNotEmpty ||
+      domainKeyword.isNotEmpty ||
+      domainRegex.isNotEmpty ||
+      geosite.isNotEmpty;
+
+  Map<String, dynamic> toSingBoxFields() => {
+        if (domainFull.isNotEmpty) 'domain': domainFull,
+        if (domainSuffix.isNotEmpty) 'domain_suffix': domainSuffix,
+        if (domainKeyword.isNotEmpty) 'domain_keyword': domainKeyword,
+        if (domainRegex.isNotEmpty) 'domain_regex': domainRegex,
+        if (geosite.isNotEmpty) 'geosite': geosite,
+      };
+
+  static _RouteTargets fromEntries(List<String> entries) {
+    final domainFull = <String>[];
+    final domainSuffix = <String>[];
+    final domainKeyword = <String>[];
+    final domainRegex = <String>[];
+    final geosite = <String>[];
+    final ipCidrs = <String>[];
+
+    for (final raw in entries) {
+      final value = raw.trim();
+      if (value.isEmpty) continue;
+
+      if (_looksLikeIpv4(value) || _looksLikeIpv6(value)) {
+        ipCidrs.add(_ensureCidr(value));
+        continue;
+      }
+
+      if (_looksLikeCidr(value)) {
+        ipCidrs.add(value);
+        continue;
+      }
+
+      final lower = value.toLowerCase();
+      if (lower.startsWith('geosite:')) {
+        geosite.add(value.substring('geosite:'.length));
+        continue;
+      }
+
+      final suffix = _stripPrefix(lower, value, ['domain-suffix:', 'domain_suffix:', 'suffix:']);
+      if (suffix != null) {
+        domainSuffix.add(suffix);
+        continue;
+      }
+
+      final keyword = _stripPrefix(lower, value, ['domain-keyword:', 'domain_keyword:', 'keyword:']);
+      if (keyword != null) {
+        domainKeyword.add(keyword);
+        continue;
+      }
+
+      final full = _stripPrefix(lower, value, ['domain-full:', 'domain_full:', 'full:', 'domain:']);
+      if (full != null) {
+        domainFull.add(full);
+        continue;
+      }
+
+      final regex = _stripPrefix(lower, value, ['domain-regex:', 'domain_regex:', 'regexp:', 'regex:']);
+      if (regex != null) {
+        domainRegex.add(regex);
+        continue;
+      }
+
+      // Default: treat as suffix-based domain
+      domainSuffix.add(value);
+    }
+
+    return _RouteTargets(
+      domainFull: domainFull,
+      domainSuffix: domainSuffix,
+      domainKeyword: domainKeyword,
+      domainRegex: domainRegex,
+      geosite: geosite,
+      ipCidrs: ipCidrs,
+    );
+  }
+
+  static bool _looksLikeIpv4(String value) {
+    final ipv4 = RegExp(r'^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$');
+    return ipv4.hasMatch(value);
+  }
+
+  static bool _looksLikeIpv6(String value) {
+    // Simplified IPv6 check — validates presence of ':' without invalid characters
+    if (!value.contains(':')) return false;
+    final ipv6 = RegExp(r'^[0-9a-fA-F:]+$');
+    return ipv6.hasMatch(value);
+  }
+
+  static String _ensureCidr(String ip) {
+    if (ip.contains('/')) return ip;
+    if (_looksLikeIpv4(ip)) return '$ip/32';
+    return '$ip/128';
+  }
+
+  static bool _looksLikeCidr(String value) {
+    final cidr = RegExp(r'^([0-9a-fA-F:.]+)/\d{1,3}$');
+    return cidr.hasMatch(value);
+  }
+
+  static String? _stripPrefix(String lower, String original, List<String> prefixes) {
+    for (final prefix in prefixes) {
+      if (lower.startsWith(prefix)) {
+        return original.substring(prefix.length);
+      }
+    }
+    return null;
+  }
 }
