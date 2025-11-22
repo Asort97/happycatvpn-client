@@ -1,0 +1,6 @@
+Placeholder for wintun.dll
+
+Download the actual wintun.dll from: https://www.wintun.net/
+Extract wintun.dll (x64) and place it here: assets/bin/wintun.dll
+
+This file is a placeholder to allow compilation. Replace with real DLL before distribution.
