@@ -12,6 +12,7 @@ String generateSingBoxConfig(
   String interfaceName = 'wintun0',
   List<String>? addresses,
   String tunStack = 'system',
+  bool enableApplicationRules = false,
 }) {
   final p = link.params;
   final transportType = p['type']; // например ws, tcp, grpc, h2
@@ -28,9 +29,11 @@ String generateSingBoxConfig(
   final packetEncoding = p['packetEncoding'] ?? p['packet'];
   // sing-box не принимает поле spider_x (spx) в текущей версии — игнорируем
 
+  final vpnTag = link.tag ?? 'vless-out';
+
   final outbound = <String, dynamic>{
     'type': 'vless',
-    'tag': link.tag ?? 'vless-out',
+    'tag': vpnTag,
     'server': link.host,
     'server_port': link.port,
     'uuid': link.uuid,
@@ -81,6 +84,10 @@ String generateSingBoxConfig(
     outbound['transport'] = transport;
   }
 
+  final appRules = enableApplicationRules
+      ? _buildApplicationRules(splitConfig, vpnTag)
+      : const <Map<String, dynamic>>[];
+
   final config = {
     'log': {
       'level': 'info',
@@ -120,9 +127,10 @@ String generateSingBoxConfig(
     ],
     'route': {
       'auto_detect_interface': true,
-      'final': _getDefaultOutbound(splitConfig, link.tag ?? 'vless-out'),
+      'final': _getDefaultOutbound(splitConfig, vpnTag),
       'rules': [
-        ..._buildRouteRules(splitConfig, link.tag ?? 'vless-out'),
+        ..._buildRouteRules(splitConfig, vpnTag),
+        ...appRules,
       ],
     }
   };
@@ -161,6 +169,31 @@ List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpn
   }
   
   return rules;
+}
+
+List<Map<String, dynamic>> _buildApplicationRules(SplitTunnelConfig config, String vpnTag) {
+  if (config.mode == 'all' || config.applications.isEmpty) return const <Map<String, dynamic>>[];
+
+  final cleaned = config.applications
+      .map((path) => path.trim())
+      .where((path) => path.isNotEmpty)
+      .toList();
+  if (cleaned.isEmpty) return const <Map<String, dynamic>>[];
+
+  final outbound = config.mode == 'whitelist' ? vpnTag : 'direct';
+  return cleaned
+      .map((entry) {
+        final key = _looksLikePath(entry) ? 'process_path' : 'process_name';
+        return {
+          key: entry,
+          'outbound': outbound,
+        };
+      })
+      .toList();
+}
+
+bool _looksLikePath(String value) {
+  return value.contains(':') || value.contains('/') || value.contains('\\');
 }
 
 Map<String, dynamic>? _buildTransport(

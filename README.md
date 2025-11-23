@@ -8,6 +8,7 @@ VLESS VPN клиент на Flutter для Windows с полноценным TUN
 - Windows 10/11 (x64)
 - sing-box.exe
 - wintun.dll (опционально, можно в assets)
+- WinDivert.dll + WinDivert64.sys (для split tunneling приложений)
 
 ### Установка
 
@@ -30,15 +31,22 @@ flutter pub get
 flutter run -d windows
 ```
 
-4. **Введите VLESS URI**  
+4. **(Опционально) Добавьте WinDivert для split tunneling приложений**  
+   - Скачайте драйвер с https://reqrypt.org/windivert.html (релиз `WinDivert-2.x-A.zip`)
+   - Поместите `WinDivert.dll` и `WinDivert64.sys` в `assets/bin/`
+   - Приложение автоматически извлечёт и подключит драйвер при запуске (нужны права администратора)
+
+5. **Введите VLESS URI**  
    Формат (Reality example):
 ```
 vless://UUID@host:443?type=tcp&security=reality&sni=example.com&fp=chrome&pbk=PUBLIC_KEY&sid=SHORT_ID&flow=xtls-rprx-vision#tag
 ```
 
-5. **Подключитесь**  
+6. **Подключитесь**  
    Нажмите `Start`. Статус изменится на «Подключено (TUN: wintun0)».  
-   Весь трафик системы теперь идёт через VPN туннель.## Формат VLESS URI
+   Весь трафик системы теперь идёт через VPN туннель.
+
+## Формат VLESS URI
 Базовый вид: `vless://UUID@HOST:PORT?param1=...&param2=...#TAG`
 Ключевые параметры:
 - `type=ws` (транспорт WebSocket) или другой тип
@@ -91,6 +99,7 @@ vless://UUID@host:443?type=tcp&security=reality&sni=example.com&fp=chrome&pbk=PU
 - **Режим "whitelist"**: Только указанные домены/IP через VPN
 - **Режим "blacklist"**: Указанные домены/IP напрямую
 - Поддержка доменов и IP CIDR
+- Приложения (.exe) требуют WinDivert: укажите путь в разделе «Приложения», чтобы направлять конкретные процессы в VPN/в обход
 
 ## TODO
 - [x] TUN inbound с wintun

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -51,6 +52,7 @@ class _VlessHomePageState extends State<VlessHomePage> {
   List<VpnProfile> _profiles = [];
   VpnProfile? _selectedProfile;
   final SingBoxController _singBoxController = SingBoxController();
+  static const String _splitConfigPrefsKey = 'split_tunnel_config_v1';
 
   VlessLink? get _parsed => _singBoxController.parsedLink;
   File? get _configFile => _singBoxController.configFile;
@@ -78,6 +80,7 @@ class _VlessHomePageState extends State<VlessHomePage> {
     final prefs = await SharedPreferences.getInstance();
     final savedProfiles = prefs.getString('vpn_profiles');
     var profiles = VpnProfile.listFromJsonString(savedProfiles);
+    SplitTunnelConfig? restoredSplit;
 
     if (profiles.isEmpty) {
       final legacyUri = prefs.getString('vless_uri');
@@ -98,10 +101,29 @@ class _VlessHomePageState extends State<VlessHomePage> {
     }
     selected ??= profiles.isNotEmpty ? profiles.first : null;
 
+    final splitRaw = prefs.getString(_splitConfigPrefsKey);
+    if (splitRaw != null) {
+      try {
+        final decoded = jsonDecode(splitRaw);
+        if (decoded is Map<String, dynamic>) {
+          restoredSplit = SplitTunnelConfig(
+            mode: _normalizeSplitMode(decoded['mode'] as String?),
+            domains: _normalizeStringList(decoded['domains']) ?? const <String>[],
+            applications: _normalizeStringList(decoded['applications']) ?? const <String>[],
+          );
+        }
+      } catch (_) {
+        // ignore corrupted prefs
+      }
+    }
+
     if (!mounted) return;
     setState(() {
       _profiles = profiles;
       _selectedProfile = selected;
+      if (restoredSplit != null) {
+        _splitConfig = restoredSplit;
+      }
     });
 
     if (selected != null) {
@@ -112,6 +134,29 @@ class _VlessHomePageState extends State<VlessHomePage> {
         _controller.text = fallbackUri;
       }
     }
+  }
+
+  String _normalizeSplitMode(String? raw) {
+    switch (raw) {
+      case 'whitelist':
+        return 'whitelist';
+      case 'blacklist':
+        return 'blacklist';
+      default:
+        return 'all';
+    }
+  }
+
+  List<String>? _normalizeStringList(dynamic value) {
+    if (value is! List) return null;
+    final result = <String>[];
+    for (final entry in value) {
+      final normalized = _normalizeEntry(entry == null ? '' : entry.toString());
+      if (normalized.isNotEmpty) {
+        result.add(normalized);
+      }
+    }
+    return result;
   }
 
   Future<void> _persistProfiles() async {
@@ -135,6 +180,23 @@ class _VlessHomePageState extends State<VlessHomePage> {
   Future<void> _saveUri() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('vless_uri', _controller.text.trim());
+  }
+
+  Future<void> _persistSplitConfig() async {
+    final prefs = await SharedPreferences.getInstance();
+    final payload = jsonEncode({
+      'mode': _splitConfig.mode,
+      'domains': _splitConfig.domains,
+      'applications': _splitConfig.applications,
+    });
+    await prefs.setString(_splitConfigPrefsKey, payload);
+  }
+
+  void _updateSplitConfig(SplitTunnelConfig config) {
+    setState(() {
+      _splitConfig = config;
+    });
+    unawaited(_persistSplitConfig());
   }
 
   Future<void> _addProfile(String name, String uri) async {
@@ -425,9 +487,7 @@ class _VlessHomePageState extends State<VlessHomePage> {
                           ),
                           selected: {_splitConfig.mode},
                           onSelectionChanged: (selection) {
-                            setState(() {
-                              _splitConfig = _splitConfig.copyWith(mode: selection.first);
-                            });
+                            _updateSplitConfig(_splitConfig.copyWith(mode: selection.first));
                           },
                         ),
                       ],
@@ -860,35 +920,45 @@ class _VlessHomePageState extends State<VlessHomePage> {
   }
 
   void _addDomainEntry(String value) {
-    setState(() {
-      final items = [..._splitConfig.domains];
-      if (items.contains(value)) return;
-      items.add(value);
-      _splitConfig = _splitConfig.copyWith(domains: items);
-    });
+    final normalized = _normalizeEntry(value);
+    if (normalized.isEmpty) return;
+    final items = [..._splitConfig.domains];
+    if (items.contains(normalized)) return;
+    items.add(normalized);
+    _updateSplitConfig(_splitConfig.copyWith(domains: items));
   }
 
   void _removeDomainEntry(String value) {
-    setState(() {
-      final items = [..._splitConfig.domains]..remove(value);
-      _splitConfig = _splitConfig.copyWith(domains: items);
-    });
+    final normalized = _normalizeEntry(value);
+    final items = [..._splitConfig.domains]..remove(normalized);
+    _updateSplitConfig(_splitConfig.copyWith(domains: items));
   }
 
   void _addApplication(String value) {
-    setState(() {
-      final apps = [..._splitConfig.applications];
-      if (apps.contains(value)) return;
-      apps.add(value);
-      _splitConfig = _splitConfig.copyWith(applications: apps);
-    });
+    final normalized = _normalizeEntry(value);
+    if (normalized.isEmpty) return;
+    final apps = [..._splitConfig.applications];
+    if (apps.contains(normalized)) return;
+    apps.add(normalized);
+    _updateSplitConfig(_splitConfig.copyWith(applications: apps));
   }
 
   void _removeApplication(String value) {
-    setState(() {
-      final apps = [..._splitConfig.applications]..remove(value);
-      _splitConfig = _splitConfig.copyWith(applications: apps);
-    });
+    final normalized = _normalizeEntry(value);
+    final apps = [..._splitConfig.applications]..remove(normalized);
+    _updateSplitConfig(_splitConfig.copyWith(applications: apps));
+  }
+
+  String _normalizeEntry(String value) {
+    var sanitized = value.trim();
+    if (sanitized.length >= 2) {
+      final first = sanitized[0];
+      final last = sanitized[sanitized.length - 1];
+      if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+        sanitized = sanitized.substring(1, sanitized.length - 1).trim();
+      }
+    }
+    return sanitized;
   }
 
   Widget _buildInfoPill(BuildContext context, IconData icon, String title, String value, {double? maxWidth}) {

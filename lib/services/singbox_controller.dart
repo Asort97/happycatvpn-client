@@ -5,6 +5,7 @@ import '../models/split_tunnel_config.dart';
 import 'android_vpn_controller.dart';
 import 'singbox_binary_manager.dart';
 import 'windows_tun_guard.dart';
+import 'windivert_manager.dart';
 import 'wintun_manager.dart';
 import '../vless/config_generator.dart';
 import '../vless/vless_parser.dart';
@@ -31,15 +32,18 @@ class SingBoxController {
     WindowsTunGuard? tunGuard,
     SingBoxBinaryManager? binaryManager,
     AndroidVpnController? androidController,
-  })  : _wintunManager = wintunManager ?? WintunManager(),
+      WinDivertManager? winDivertManager,
+    })  : _wintunManager = wintunManager ?? WintunManager(),
         _tunGuard = tunGuard ?? WindowsTunGuard(),
         _binaryManager = binaryManager ?? SingBoxBinaryManager(),
-        _androidController = androidController ?? AndroidVpnController();
+      _androidController = androidController ?? AndroidVpnController(),
+      _winDivertManager = winDivertManager ?? WinDivertManager();
 
   final WintunManager _wintunManager;
   final WindowsTunGuard _tunGuard;
   final SingBoxBinaryManager _binaryManager;
   final AndroidVpnController _androidController;
+    final WinDivertManager _winDivertManager;
 
   Process? _process;
   StreamSubscription<String>? _stdoutSub;
@@ -98,6 +102,7 @@ class SingBoxController {
     String inboundTag = WindowsTunGuard.defaultInboundTag;
     String interfaceName = WindowsTunGuard.defaultInterfaceName;
     List<String> interfaceAddresses = const ['172.19.0.1/30'];
+    WinDivertPaths? winDivertPaths;
 
     if (Platform.isWindows) {
       _notifyStatus('Проверка TUN интерфейса');
@@ -119,6 +124,14 @@ class SingBoxController {
       if (guardResult.leftoverAdapters.isNotEmpty) {
         unawaited(_tunGuard.cleanupAdapters(guardResult.leftoverAdapters).then(_emitLogs));
       }
+
+      _notifyStatus('Подготовка WinDivert');
+      winDivertPaths = await _winDivertManager.ensureAvailable();
+      if (winDivertPaths == null || !winDivertPaths.isReady) {
+        return SingBoxStartResult.failure(
+          'WinDivert не найден. Убедитесь, что WinDivert.dll и WinDivert64.sys добавлены в assets/bin.',
+        );
+      }
     } else {
       _activeInterfaceName = null;
     }
@@ -131,6 +144,7 @@ class SingBoxController {
       interfaceName: interfaceName,
       addresses: interfaceAddresses,
       tunStack: Platform.isAndroid ? 'gvisor' : 'system',
+      enableApplicationRules: Platform.isWindows,
     );
     _generatedConfig = jsonConfig;
     _configFile = null;
@@ -162,7 +176,20 @@ class SingBoxController {
 
     _notifyStatus('Запуск процесса');
     try {
-      final process = await Process.start(exePath, ['run', '-c', cfgFile.path]);
+      final environment = Map<String, String>.from(Platform.environment);
+      if (winDivertPaths != null && winDivertPaths.directory.isNotEmpty) {
+        final dllDir = winDivertPaths.directory;
+        final existingPath = environment['PATH'];
+        environment['PATH'] = (existingPath == null || existingPath.isEmpty)
+          ? dllDir
+          : '$dllDir;$existingPath';
+      }
+
+      final process = await Process.start(
+        exePath,
+        ['run', '-c', cfgFile.path],
+        environment: environment,
+      );
       _process = process;
       _attachProcessHandlers(process, interfaceName);
       _notifyStatus('Подключено (TUN: $interfaceName)');

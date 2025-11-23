@@ -156,6 +156,31 @@ vless://uuid@example.com:443?type=ws&security=reality&path=/ws&host=example.com&
 }
 ```
 
+## Пример 5: Приложения (требует WinDivert на Windows)
+
+### Настройки
+- Режим: `blacklist`
+- Приложения: `C:/Program Files/Telegram/Telegram.exe`
+
+### Route rules
+```json
+"route": {
+  "auto_detect_interface": true,
+  "final": "vless-out",
+  "rules": [
+    {
+      "process_path": "C:/Program Files/Telegram/Telegram.exe",
+      "outbound": "direct"
+    },
+    {
+      "protocol": "dns",
+      "outbound": "dns-out"
+    }
+  ]
+}
+```
+> Примечание: правила `process_path` работают только на Windows при наличии WinDivert.
+
 ## Проверка работы
 
 ### 1. Проверка подключения

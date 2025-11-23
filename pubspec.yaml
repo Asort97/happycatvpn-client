@@ -63,6 +63,8 @@ flutter:
   assets:
     - assets/bin/wintun.dll
     - assets/bin/sing-box
+    - assets/bin/WinDivert.dll
+    - assets/bin/WinDivert64.sys
 
   # To add assets to your application, add an assets section, like this:
   # assets:
