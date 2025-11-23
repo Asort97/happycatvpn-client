@@ -26,4 +26,34 @@ class SplitTunnelConfig {
       applications: applications ?? this.applications,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'mode': mode,
+        'domains': domains,
+        'applications': applications,
+      };
+
+  factory SplitTunnelConfig.fromJson(Map<String, dynamic>? json, {required String fallbackMode}) {
+    if (json == null) {
+      return SplitTunnelConfig(mode: fallbackMode);
+    }
+    List<String> mapList(String key) {
+      final value = json[key];
+      if (value is List) {
+        return value.map((e) => e?.toString().trim() ?? '').where((e) => e.isNotEmpty).toList();
+      }
+      return const [];
+    }
+
+    final rawMode = json['mode']?.toString();
+    return SplitTunnelConfig(
+      mode: rawMode == 'whitelist'
+          ? 'whitelist'
+          : rawMode == 'blacklist'
+              ? 'blacklist'
+              : fallbackMode,
+      domains: mapList('domains'),
+      applications: mapList('applications'),
+    );
+  }
 }

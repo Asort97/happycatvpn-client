@@ -36,6 +36,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.3.3
   path_provider: ^2.1.4
+  window_manager: ^0.5.1
+  tray_manager: ^0.2.1
 
 dev_dependencies:
   flutter_test:
@@ -63,8 +65,10 @@ flutter:
   assets:
     - assets/bin/wintun.dll
     - assets/bin/sing-box
+    - assets/bin/sing-box.exe
     - assets/bin/WinDivert.dll
     - assets/bin/WinDivert64.sys
+    - windows/runner/resources/app_icon.ico
 
   # To add assets to your application, add an assets section, like this:
   # assets:
