@@ -42,3 +42,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    implementation(files("libs/libbox.aar"))
+    implementation("androidx.activity:activity-ktx:1.9.3")
+}

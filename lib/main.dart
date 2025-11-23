@@ -1,11 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'vless/vless_parser.dart';
-import 'vless/config_generator.dart';
 import 'models/split_tunnel_config.dart';
-import 'services/wintun_manager.dart';
-import 'services/windows_tun_guard.dart';
+import 'services/singbox_controller.dart';
 import 'models/vpn_profile.dart';
 
 void main() {
@@ -45,18 +45,16 @@ class VlessHomePage extends StatefulWidget {
 
 class _VlessHomePageState extends State<VlessHomePage> {
   final TextEditingController _controller = TextEditingController();
-  Process? _process;
   String _status = 'Idle';
   List<String> _logLines = [];
-  VlessLink? _parsed;
-  File? _configFile;
-  String? _generatedConfig;
   SplitTunnelConfig _splitConfig = SplitTunnelConfig();
   List<VpnProfile> _profiles = [];
   VpnProfile? _selectedProfile;
-  final WintunManager _wintunManager = WintunManager();
-  final WindowsTunGuard _tunGuard = WindowsTunGuard();
-  String? _activeInterfaceName;
+  final SingBoxController _singBoxController = SingBoxController();
+
+  VlessLink? get _parsed => _singBoxController.parsedLink;
+  File? get _configFile => _singBoxController.configFile;
+  String? get _generatedConfig => _singBoxController.generatedConfig;
 
   @override
   void initState() {
@@ -66,11 +64,15 @@ class _VlessHomePageState extends State<VlessHomePage> {
   }
 
   Future<void> _checkWintun() async {
-    final available = await _wintunManager.isWintunAvailable();
+    final available = await _singBoxController.isWintunAvailable();
     if (!available && mounted) {
       setState(() => _status = 'Предупреждение: wintun.dll не найден');
     }
   }
+
+  bool get _isRunning => _singBoxController.isRunning;
+
+  String get _interfaceLabel => _singBoxController.interfaceLabel;
 
   Future<void> _loadInitialData() async {
     final prefs = await SharedPreferences.getInstance();
@@ -243,164 +245,48 @@ class _VlessHomePageState extends State<VlessHomePage> {
   }
 
   Future<void> _start() async {
-    // Останавливаем старый процесс если есть
-    if (_process != null) {
+    if (_isRunning) {
       await _stop();
-      // Увеличенная задержка для гарантии освобождения интерфейса
       await Future.delayed(const Duration(seconds: 2));
     }
 
-    final raw = _controller.text.trim();
-    final parsed = parseVlessUri(raw);
-    if (parsed == null) {
-      setState(() => _status = 'Ошибка: неверный формат VLESS URI');
-      return;
-    }
-    
-    // Сохраняем URI
-    await _saveUri();
     setState(() {
-      _parsed = parsed;
-      _status = 'Генерация конфига';
+      _status = 'Подготовка подключения';
       _logLines.clear();
     });
 
-    String inboundTag = WindowsTunGuard.defaultInboundTag;
-    String interfaceName = WindowsTunGuard.defaultInterfaceName;
-    List<String> interfaceAddresses = const ['172.19.0.1/30'];
-
-    if (Platform.isWindows) {
-      setState(() => _status = 'Проверка TUN интерфейса');
-      final guardResult = await _tunGuard.prepare();
-      _appendLogs(guardResult.logs);
-
-      if (!guardResult.success) {
-        setState(() {
-          _status = guardResult.requiresElevation
-              ? '❌ Нужны права администратора для управления TUN интерфейсом'
-              : guardResult.error ?? 'Не удалось подготовить TUN интерфейс';
-        });
-        return;
-      }
-
-      inboundTag = guardResult.inboundTag;
-      interfaceName = guardResult.interfaceName;
-      interfaceAddresses = guardResult.addresses;
-      if (guardResult.leftoverAdapters.isNotEmpty) {
-        _tunGuard.cleanupAdapters(guardResult.leftoverAdapters).then(_appendLogs);
-      }
-      setState(() => _status = 'Генерация конфига');
-    }
-
-    _activeInterfaceName = interfaceName;
-
-    final jsonConfig = generateSingBoxConfig(
-      parsed,
-      _splitConfig,
-      inboundTag: inboundTag,
-      interfaceName: interfaceName,
-      addresses: interfaceAddresses,
+    final result = await _singBoxController.connect(
+      rawUri: _controller.text,
+      splitConfig: _splitConfig,
+      onStatus: (value) {
+        if (!mounted) return;
+        setState(() => _status = value);
+      },
+      onLog: (line) => _appendLogs([line]),
     );
-    _generatedConfig = jsonConfig;
-    final tempDir = Directory.systemTemp.createTempSync('singbox_cfg_');
-    final cfgFile = File('${tempDir.path}/config.json');
-    cfgFile.writeAsStringSync(jsonConfig);
-    _configFile = cfgFile;
 
-    final exePath = _resolveBinaryPath();
-    if (exePath == null) {
-      setState(() => _status = 'Не найден sing-box.exe');
+    if (!result.success) {
+      if (!mounted) return;
+      setState(() => _status = result.errorMessage ?? 'Ошибка подключения');
       return;
     }
 
-    setState(() => _status = 'Запуск процесса');
-    try {
-      final process = await Process.start(exePath, ['run', '-c', cfgFile.path]);
-      _process = process;
-      final runInterface = interfaceName;
-      setState(() => _status = 'Подключено (TUN: $runInterface)');
-
-      process.stdout.transform(SystemEncoding().decoder).listen((data) {
-        setState(() {
-          _logLines.add(data.trim());
-          if (_logLines.length > 200) _logLines.removeAt(0);
-        });
-      });
-      process.stderr.transform(SystemEncoding().decoder).listen((data) {
-        final line = data.trim();
-        setState(() {
-          _logLines.add('[ERR] $line');
-          if (_logLines.length > 200) _logLines.removeAt(0);
-          
-          // Проверка на ошибку доступа (Access is denied)
-          if (line.contains('Access is denied') || line.contains('configure tun interface')) {
-            _status = '❌ Нужны права администратора! Запустите приложение от имени администратора';
-          }
-        });
-      });
-      process.exitCode.then((code) {
-        if (mounted) {
-          setState(() {
-            if (code == 1 && _logLines.any((l) => l.contains('Access is denied'))) {
-              _status = '❌ Ошибка доступа - запустите от администратора';
-            } else {
-              _status = 'Процесс завершён (код $code)';
-            }
-            _process = null;
-          });
-        } else {
-          _process = null;
-        }
-        if (_activeInterfaceName == runInterface) {
-          _activeInterfaceName = null;
-          _tunGuard.cleanupAdapter(runInterface).then(_appendLogs);
-        }
-      });
-    } catch (e) {
-      setState(() => _status = 'Ошибка запуска: $e');
-    }
+    await _saveUri();
+    if (!mounted) return;
+    setState(() {});
   }
 
   Future<void> _stop() async {
-    final p = _process;
-    if (p == null) return;
-    setState(() => _status = 'Остановка...');
-    
-    // Сначала пробуем мягкую остановку
-    p.kill(ProcessSignal.sigterm);
-    
-    // Ждём завершения процесса
-    try {
-      final exitCode = await p.exitCode.timeout(
-        const Duration(seconds: 3),
-        onTimeout: () {
-          // Если не остановился - принудительно
-          p.kill(ProcessSignal.sigkill);
-          return -1;
-        },
-      );
-      if (exitCode == -1) {
-        // Ждём после kill
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-    } catch (e) {
-      // На случай ошибки просто kill
-      p.kill(ProcessSignal.sigkill);
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
-    
-    // Дополнительная задержка для освобождения TUN интерфейса
-    await Future.delayed(const Duration(seconds: 1));
-    
-    _process = null;
-
-    if (Platform.isWindows && _activeInterfaceName != null) {
-      final logs = await _tunGuard.cleanupAdapter(_activeInterfaceName);
-      _appendLogs(logs);
-      _activeInterfaceName = null;
-    }
-
-    if (mounted) setState(() => _status = 'Остановлено');
+    if (!_isRunning) return;
+    await _singBoxController.disconnect(
+      onStatus: (value) {
+        if (!mounted) return;
+        setState(() => _status = value);
+      },
+      onLog: (line) => _appendLogs([line]),
+    );
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _appendLogs(Iterable<String> entries) {
@@ -417,17 +303,12 @@ class _VlessHomePageState extends State<VlessHomePage> {
     });
   }
 
-  String? _resolveBinaryPath() {
-    final candidates = [
-      'sing-box.exe',
-      'windows/sing-box.exe',
-      'assets/bin/sing-box.exe',
-    ];
-    for (final c in candidates) {
-      final f = File(c);
-      if (f.existsSync()) return f.path;
-    }
-    return null;
+  Future<void> _copyStatusToClipboard() async {
+    await Clipboard.setData(ClipboardData(text: _status));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Состояние скопировано')),
+    );
   }
 
   void _showConfigDialog(BuildContext context) {
@@ -454,7 +335,7 @@ class _VlessHomePageState extends State<VlessHomePage> {
   @override
   void dispose() {
     _controller.dispose();
-    _process?.kill();
+    unawaited(_singBoxController.dispose());
     super.dispose();
   }
 
@@ -596,80 +477,113 @@ class _VlessHomePageState extends State<VlessHomePage> {
 
   Widget _buildStatusHero(BuildContext context, bool isWide) {
     final scheme = Theme.of(context).colorScheme;
-    final isRunning = _process != null;
+    final isRunning = _isRunning;
     final gradient = isRunning
       ? [const Color(0xFFFF1B2D), const Color(0xFF51030F)]
       : [const Color(0xFF1A1B22), const Color(0xFF08090F)];
     final icon = isRunning ? Icons.shield : Icons.shield_outlined;
     final hostLabel = _parsed != null ? '${_parsed!.host}:${_parsed!.port}' : 'Хост не выбран';
-    final configLabel = _configFile != null ? _configFile!.path : 'Конфиг ещё не сгенерирован';
+    final configLabel = Platform.isWindows
+        ? (_configFile != null ? _configFile!.path : 'Конфиг ещё не сгенерирован')
+        : (_generatedConfig != null ? 'Передан в сервис' : 'Конфиг ещё не сгенерирован');
+    final screenWidth = MediaQuery.of(context).size.width;
+    final compactWidth = (screenWidth - 60).clamp(220.0, 600.0);
+    final pillMaxWidth = isWide ? 320.0 : compactWidth;
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      padding: const EdgeInsets.all(28),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(28),
-        gradient: LinearGradient(colors: gradient, begin: Alignment.topLeft, end: Alignment.bottomRight),
-        boxShadow: [
-          BoxShadow(
-            color: scheme.primary.withOpacity(isRunning ? 0.25 : 0.1),
-            blurRadius: 30,
-            offset: const Offset(0, 20),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 640;
+        final actions = Wrap(
+          spacing: 10,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _copyStatusToClipboard,
+              icon: const Icon(Icons.copy_all_outlined),
+              label: const Text('Скопировать состояние'),
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
+            ),
+            if (_generatedConfig != null)
+              TextButton.icon(
+                onPressed: () => _showConfigDialog(context),
+                icon: const Icon(Icons.visibility_outlined),
+                label: const Text('Config'),
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+              ),
+          ],
+        );
+
+        final statusTexts = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SelectableText(
+              _status,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              hostLabel,
+              style: TextStyle(color: Colors.white.withOpacity(0.9)),
+            ),
+          ],
+        );
+
+        final header = Flex(
+          direction: compact ? Axis.vertical : Axis.horizontal,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 46, color: Colors.white),
+            SizedBox(width: compact ? 0 : 16, height: compact ? 16 : 0),
+            compact
+                ? statusTexts
+                : Expanded(child: statusTexts),
+            if (!compact) ...[const SizedBox(width: 16), actions],
+          ],
+        );
+
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(28),
+            gradient: LinearGradient(colors: gradient, begin: Alignment.topLeft, end: Alignment.bottomRight),
+            boxShadow: [
+              BoxShadow(
+                color: scheme.primary.withOpacity(isRunning ? 0.25 : 0.1),
+                blurRadius: 30,
+                offset: const Offset(0, 20),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(icon, size: 46, color: Colors.white),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _status,
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      hostLabel,
-                      style: TextStyle(color: Colors.white.withOpacity(0.9)),
-                    ),
-                  ],
-                ),
+              header,
+              if (compact) ...[
+                const SizedBox(height: 16),
+                actions,
+              ],
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 16,
+                runSpacing: 8,
+                children: [
+                  _buildInfoPill(context, Icons.account_circle, 'Профиль', _selectedProfile?.name ?? 'Ручной ввод', maxWidth: pillMaxWidth),
+                  _buildInfoPill(context, Icons.cloud_outlined, 'Интерфейс', _interfaceLabel, maxWidth: pillMaxWidth),
+                  _buildInfoPill(context, Icons.folder_outlined, 'Config Path', configLabel, maxWidth: pillMaxWidth),
+                ],
               ),
-              if (_generatedConfig != null)
-                TextButton.icon(
-                  onPressed: () => _showConfigDialog(context),
-                  icon: const Icon(Icons.visibility_outlined),
-                  label: const Text('Config'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.white),
-                ),
             ],
           ),
-          const SizedBox(height: 20),
-          Wrap(
-            spacing: 16,
-            runSpacing: 8,
-            children: [
-              _buildInfoPill(context, Icons.account_circle, 'Профиль', _selectedProfile?.name ?? 'Ручной ввод'),
-              _buildInfoPill(context, Icons.cloud_outlined, 'Интерфейс', _activeInterfaceName ?? 'wintun0'),
-              _buildInfoPill(context, Icons.folder_outlined, 'Config Path', configLabel, maxWidth: isWide ? 320 : 220),
-            ],
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   Widget _buildProfileCard(BuildContext context) {
     final theme = Theme.of(context);
     final hasProfiles = _profiles.isNotEmpty;
-    final isRunning = _process != null;
+    final isRunning = _isRunning;
     final canConnect = hasProfiles && !isRunning;
 
     return Card(

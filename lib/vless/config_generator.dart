@@ -11,6 +11,7 @@ String generateSingBoxConfig(
   String inboundTag = 'tun-in',
   String interfaceName = 'wintun0',
   List<String>? addresses,
+  String tunStack = 'system',
 }) {
   final p = link.params;
   final transportType = p['type']; // например ws, tcp, grpc, h2
@@ -75,13 +76,8 @@ String generateSingBoxConfig(
   }
 
   // transportType=tcp в sing-box не задаётся как отдельный transport.
-  if (transportType != null && transportType.isNotEmpty && transportType != 'tcp') {
-    final transport = <String, dynamic>{'type': transportType};
-    if (transportType == 'ws') {
-      if (path != null && path.isNotEmpty) transport['path'] = path;
-      final hostHeader = p['host'] ?? link.host;
-      transport['headers'] = {'Host': hostHeader};
-    }
+  final transport = _buildTransport(transportType, link, p, path, serverName);
+  if (transport != null) {
     outbound['transport'] = transport;
   }
 
@@ -109,7 +105,7 @@ String generateSingBoxConfig(
         'type': 'tun',
         'tag': inboundTag,
         'interface_name': interfaceName,
-        'stack': 'system',
+        'stack': tunStack,
         'mtu': 1400,
         'address': addresses ?? const ['172.19.0.1/30'],
         'auto_route': true,
@@ -165,6 +161,140 @@ List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpn
   }
   
   return rules;
+}
+
+Map<String, dynamic>? _buildTransport(
+  String? transportType,
+  VlessLink link,
+  Map<String, String> params,
+  String? path,
+  String serverName,
+) {
+  final normalizedType = transportType?.toLowerCase();
+  final headerHost = _firstParam(params, ['host', 'Host']) ?? link.host;
+
+  if (normalizedType == null || normalizedType.isEmpty || normalizedType == 'tcp') {
+    final headerType = _firstParam(params, ['headerType', 'header_type'])?.toLowerCase();
+    if (headerType == 'http') {
+      return _buildHttpTransport(params, path, headerHost, serverName);
+    }
+    return null;
+  }
+
+  switch (normalizedType) {
+    case 'ws':
+      return {
+        'type': 'ws',
+        if (path != null && path.isNotEmpty) 'path': path,
+        'headers': {'Host': headerHost},
+      };
+    case 'grpc':
+      final serviceName = _firstParam(params, ['serviceName', 'service_name', 'servicename']) ??
+          path?.replaceFirst(RegExp(r'^/'), '');
+      final authority = _firstParam(params, ['authority']) ?? headerHost;
+      final multiMode = _parseBool(_firstParam(params, ['multiMode', 'multimode']));
+      final idleTimeout = _firstParam(params, ['idle_timeout', 'idleTimeout']);
+      return {
+        'type': 'grpc',
+        if (serviceName != null && serviceName.isNotEmpty) 'service_name': serviceName,
+        if (authority.isNotEmpty) 'authority': authority,
+        if (multiMode != null) 'multi_mode': multiMode,
+        if (idleTimeout != null && idleTimeout.isNotEmpty) 'idle_timeout': idleTimeout,
+        if (params['mode'] != null && params['mode']!.isNotEmpty) 'mode': params['mode'],
+      };
+    case 'http':
+    case 'h2':
+      return _buildHttpTransport(params, path, headerHost, serverName);
+    case 'httpupgrade':
+      return {
+        'type': 'httpupgrade',
+        if (path != null && path.isNotEmpty) 'path': path,
+        'headers': {'Host': headerHost},
+      };
+    case 'quic':
+      final security = _firstParam(params, ['quicSecurity', 'quic_security']) ?? 'none';
+      final key = _firstParam(params, ['key', 'quicKey', 'quic_key']);
+      return {
+        'type': 'quic',
+        'security': security,
+        if (key != null && key.isNotEmpty) 'key': key,
+        if (path != null && path.isNotEmpty) 'path': path,
+        'headers': {'Host': headerHost},
+      };
+    default:
+      return {'type': normalizedType};
+  }
+}
+
+Map<String, dynamic> _buildHttpTransport(
+  Map<String, String> params,
+  String? path,
+  String headerHost,
+  String serverName,
+) {
+  final hosts = _splitCsv(_firstParam(params, ['host', 'hosts']));
+  if (hosts.isEmpty && headerHost.isNotEmpty) {
+    hosts.add(headerHost);
+  }
+  final method = _firstParam(params, ['method']) ?? 'GET';
+  final headers = <String, String>{};
+  final headerOverride = _firstParam(params, ['header', 'headers']);
+  if (headerOverride != null && headerOverride.contains(':')) {
+    for (final entry in headerOverride.split('|')) {
+      final parts = entry.split(':');
+      if (parts.length >= 2) {
+        headers[parts[0].trim()] = parts.sublist(1).join(':').trim();
+      }
+    }
+  }
+  if (!headers.containsKey('Host') && hosts.isNotEmpty) {
+    headers['Host'] = hosts.first;
+  }
+  if (!headers.containsKey('Authority')) {
+    final authority = _firstParam(params, ['authority']);
+    if (authority != null && authority.isNotEmpty) {
+      headers['Authority'] = authority;
+    }
+  }
+  if (!headers.containsKey('User-Agent')) {
+    final ua = _firstParam(params, ['ua', 'userAgent', 'user_agent']);
+    if (ua != null && ua.isNotEmpty) headers['User-Agent'] = ua;
+  }
+
+  return {
+    'type': 'http',
+    'method': method,
+    if (path != null && path.isNotEmpty) 'path': path,
+    if (hosts.isNotEmpty) 'host': hosts,
+    if (headers.isNotEmpty) 'headers': headers,
+  };
+}
+
+String? _firstParam(Map<String, String> params, List<String> keys) {
+  for (final key in keys) {
+    final value = params[key];
+    if (value != null && value.isNotEmpty) {
+      return value;
+    }
+  }
+  return null;
+}
+
+List<String> _splitCsv(String? raw) {
+  if (raw == null || raw.isEmpty) return <String>[];
+  return raw
+      .split(',')
+      .map((e) => e.trim())
+      .where((element) => element.isNotEmpty)
+      .toList();
+}
+
+bool? _parseBool(String? raw) {
+  if (raw == null) return null;
+  final lower = raw.toLowerCase();
+  if (lower == 'true' || lower == '1') return true;
+  if (lower == 'false' || lower == '0') return false;
+  return null;
 }
 
 class _RouteTargets {
