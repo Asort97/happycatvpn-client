@@ -45,7 +45,7 @@ class VpnApp extends StatelessWidget {
       brightness: Brightness.dark,
     );
     return MaterialApp(
-      title: 'VLESS VPN Client',
+      title: 'VLESS VPN Клиент',
       theme: ThemeData(
         colorScheme: colorScheme,
         scaffoldBackgroundColor: const Color(0xFF050608),
@@ -1182,11 +1182,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('VLESS VPN Client (Prototype)'),
+          title: const Text('VLESS VPN Клиент (Прототип)'),
           bottom: const TabBar(
             tabs: [
-              Tab(text: 'Connection'),
-              Tab(text: 'Split Tunneling'),
+              Tab(text: 'Подключение'),
+              Tab(text: 'Сплит-туннелирование'),
             ],
           ),
         ),
@@ -1263,7 +1263,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                           children: [
                             Icon(Icons.layers_outlined, color: Theme.of(context).colorScheme.primary),
                             const SizedBox(width: 12),
-                            const Text('Split Tunneling', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                            const Text('Сплит-туннелирование', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                           ],
                         ),
                         const SizedBox(height: 10),
@@ -1540,8 +1540,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final icon = isRunning ? Icons.shield : Icons.shield_outlined;
     final hostLabel = _parsed != null ? '${_parsed!.host}:${_parsed!.port}' : 'Хост не выбран';
     final configLabel = Platform.isWindows
-        ? (_configFile != null ? _configFile!.path : 'Конфиг ещё не сгенерирован')
-        : (_generatedConfig != null ? 'Передан в сервис' : 'Конфиг ещё не сгенерирован');
+      ? (_configFile != null ? _configFile!.path : 'Конфиг ещё не сгенерирован')
+      : (_generatedConfig != null ? 'Передан в сервис' : 'Конфиг ещё не сгенерирован');
     final screenWidth = MediaQuery.of(context).size.width;
     final compactWidth = (screenWidth - 60).clamp(200.0, 320.0);
     final pillMaxWidth = isWide ? 240.0 : compactWidth;
@@ -1557,7 +1557,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             OutlinedButton.icon(
               onPressed: canRefreshMetrics ? () => _refreshMetrics() : null,
               icon: Icon(_pingInProgress ? Icons.timelapse : Icons.refresh_outlined),
-              label: Text(_pingInProgress ? 'Measuring...' : 'Refresh Ping'),
+              label: Text(_pingInProgress ? 'Измерение...' : 'Обновить пинг'),
               style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
             ),
             OutlinedButton.icon(
@@ -1570,7 +1570,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               TextButton.icon(
                 onPressed: () => _showConfigDialog(context),
                 icon: const Icon(Icons.visibility_outlined),
-                label: const Text('Config'),
+                label: const Text('Конфиг'),
                 style: TextButton.styleFrom(foregroundColor: Colors.white),
               ),
           ],
@@ -1649,11 +1649,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 spacing: 16,
                 runSpacing: 8,
                 children: [
-                  _buildInfoPill(context, Icons.account_circle, 'Profile', _selectedProfileLabel, maxWidth: pillMaxWidth),
-                  _buildInfoPill(context, Icons.speed_outlined, 'Ping', _pingLabel, maxWidth: pillMaxWidth),
-                  if (_developerMode) _buildInfoPill(context, Icons.cloud_outlined, 'Interface', _interfaceLabel, maxWidth: pillMaxWidth),
+                  _buildInfoPill(context, Icons.account_circle, 'Профиль', _selectedProfileLabel, maxWidth: pillMaxWidth),
+                  _buildInfoPill(context, Icons.speed_outlined, 'Пинг', _pingLabel, maxWidth: pillMaxWidth),
+                  if (_developerMode) _buildInfoPill(context, Icons.cloud_outlined, 'Интерфейс', _interfaceLabel, maxWidth: pillMaxWidth),
                   if (_developerMode && _configFile != null)
-                    _buildInfoPill(context, Icons.folder_outlined, 'Config Path', configLabel, maxWidth: pillMaxWidth),
+                    _buildInfoPill(context, Icons.folder_outlined, 'Путь конфига', configLabel, maxWidth: pillMaxWidth),
                 ],
               ),
               const SizedBox(height: 14),
@@ -1668,6 +1668,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final theme = Theme.of(context);
     final hasProfiles = _profiles.isNotEmpty;
 
+    // ...existing code...
     final profileCard = Card(
       color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.25),
       elevation: 0,
@@ -1726,7 +1727,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                       final profile = _profiles[index];
                       final isSelected = _selectedProfile?.name == profile.name;
                       final ping = _profilePings[profile.name];
-                      final pingLabel = ping != null ? 'Ping: $ping ms' : 'No ping';
+                      final pingLabel = ping != null ? 'Пинг: $ping мс' : 'Нет пинга';
                       return Container(
                         margin: const EdgeInsets.only(bottom: 8),
                         padding: const EdgeInsets.all(8),
@@ -1769,13 +1770,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                                           backgroundColor: isSelected ? theme.colorScheme.primary : null,
                                           foregroundColor: isSelected ? Colors.white : null,
                                         ),
-                                        child: const Text('Select'),
+                                        child: const Text('Выбрать'),
                                       ),
                                       if (isSelected)
                                         Padding(
                                           padding: const EdgeInsets.only(left: 8),
                                           child: Text(
-                                            _isRunning ? 'Connected' : 'Selected',
+                                            _isRunning ? 'Подключено' : 'Выбрано',
                                             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
                                           ),
                                         ),
@@ -1785,12 +1786,12 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                               ),
                             ),
                             IconButton(
-                              tooltip: 'Edit profile',
+                              tooltip: 'Редактировать профиль',
                               icon: const Icon(Icons.edit_outlined, size: 18),
                               onPressed: () => _showEditProfileDialog(profile),
                             ),
                             IconButton(
-                              tooltip: 'Delete profile',
+                              tooltip: 'Удалить профиль',
                               icon: const Icon(Icons.delete_outline, size: 18),
                               onPressed: () => _removeProfileByName(profile.name),
                             ),
