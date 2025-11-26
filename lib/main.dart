@@ -98,15 +98,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   static const String _splitToggleKey = 'split_tunnel_enabled';
   int? _pingMs;
   bool _pingInProgress = false;
-  double? _lastSpeedMbps;
-  bool _speedInProgress = false;
   bool _splitEnabled = true;
   final Map<String, int> _profilePings = {};
-  final Map<String, double> _profileSpeeds = {};
   final List<String> _logLines = <String>[];
   int _profileNameCounter = 0;
   static const String _profileMetricsKey = 'vpn_profile_metrics';
   static const String _profileCounterKey = 'vpn_profile_counter';
+  bool _developerMode = false;
 
   VlessLink? get _parsed => _singBoxController.parsedLink;
   File? get _configFile => _singBoxController.configFile;
@@ -119,8 +117,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
     return _presetDirty ? '${_activePresetName!}*' : _activePresetName!;
   }
-  String get _speedLabel =>
-      _speedInProgress ? 'Measuring...' : (_lastSpeedMbps != null ? '${_lastSpeedMbps!.toStringAsFixed(1)} Mbps' : '--');
   String get _pingLabel => _pingInProgress ? 'Measuring...' : (_pingMs != null ? '$_pingMs ms' : '--');
   String get _selectedProfileLabel => _selectedProfile?.name ?? 'Choose server';
   SplitTunnelConfig get _activeSplitConfig => _splitConfigs[_splitMode] ?? _splitConfigs['all']!;
@@ -281,8 +277,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final storedCounter = prefs.getInt(_profileCounterKey) ?? 0;
     final metricsRaw = prefs.getString(_profileMetricsKey);
     final restoredPings = <String, int>{};
-    final restoredSpeeds = <String, double>{};
     bool splitEnabled = prefs.getBool(_splitToggleKey) ?? true;
+    _developerMode = prefs.getBool('developer_mode') ?? false;
 
     if (metricsRaw != null && metricsRaw.isNotEmpty) {
       try {
@@ -291,12 +287,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           decoded.forEach((key, value) {
             if (value is Map) {
               final ping = value['ping'];
-              final speed = value['speed'];
               if (ping is int) {
                 restoredPings[key] = ping;
-              }
-              if (speed is num) {
-                restoredSpeeds[key] = speed.toDouble();
               }
             }
           });
@@ -403,9 +395,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       _profilePings
         ..clear()
         ..addAll(restoredPings);
-      _profileSpeeds
-        ..clear()
-        ..addAll(restoredSpeeds);
     });
 
     if (selected != null) {
@@ -462,16 +451,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
 
   Future<void> _persistProfileMetrics() async {
     final prefs = await SharedPreferences.getInstance();
-    if (_profilePings.isEmpty && _profileSpeeds.isEmpty) {
+    if (_profilePings.isEmpty) {
       await prefs.remove(_profileMetricsKey);
       return;
     }
     final payload = <String, Map<String, dynamic>>{};
     for (final entry in _profilePings.entries) {
       payload.putIfAbsent(entry.key, () => <String, dynamic>{})['ping'] = entry.value;
-    }
-    for (final entry in _profileSpeeds.entries) {
-      payload.putIfAbsent(entry.key, () => <String, dynamic>{})['speed'] = entry.value;
     }
     await prefs.setString(_profileMetricsKey, jsonEncode(payload));
   }
@@ -555,34 +541,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     return avg.round();
   }
 
-  Future<double?> _measureSpeedSample() async {
-    const sampleBytes = 2 * 1024 * 1024; // 2 MB sample to avoid throttling the connection
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
-    final sw = Stopwatch()..start();
-    var received = 0;
-    try {
-      final request = await client.getUrl(Uri.parse('https://speed.cloudflare.com/__down?bytes=$sampleBytes'));
-      final response = await request.close();
-      await for (final chunk in response) {
-        received += chunk.length;
-        if (received >= sampleBytes) {
-          break;
-        }
-      }
-    } catch (_) {
-      return null;
-    } finally {
-      sw.stop();
-      client.close(force: true);
-    }
-    if (received == 0 || sw.elapsedMilliseconds == 0) return null;
-    final seconds = sw.elapsedMilliseconds / 1000;
-    final mbps = (received * 8) / (seconds * 1000 * 1000);
-    return double.parse(mbps.toStringAsFixed(2));
-  }
-
   Future<void> _refreshMetrics({bool silent = false}) async {
-    if (_pingInProgress || _speedInProgress) return;
+    if (_pingInProgress) return;
     final link = _currentLink();
     if (link == null) {
       if (!silent) {
@@ -592,41 +552,30 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
     setState(() {
       _pingInProgress = true;
-      _speedInProgress = true;
     });
 
     final ping = await _measurePing(link.host, link.port);
-    final speed = await _measureSpeedSample();
 
     if (!mounted) return;
     setState(() {
       _pingMs = ping;
-      _lastSpeedMbps = speed;
       _pingInProgress = false;
-      _speedInProgress = false;
       final profileName = _selectedProfile?.name;
-      if (profileName != null) {
-        if (ping != null) {
-          _profilePings[profileName] = ping;
-        }
-        if (speed != null) {
-          _profileSpeeds[profileName] = speed;
-        }
+      if (profileName != null && ping != null) {
+        _profilePings[profileName] = ping;
       }
     });
     await _persistProfileMetrics();
-    if (!silent && (ping != null || speed != null)) {
-      _showFastSnack('Ping/Speed обновлены');
+    if (!silent && ping != null) {
+      _showFastSnack('Ping обновлен');
     }
   }
   void _syncMetricsFromProfile(VpnProfile? profile) {
     if (profile == null) {
       _pingMs = null;
-      _lastSpeedMbps = null;
       return;
     }
     _pingMs = _profilePings[profile.name];
-    _lastSpeedMbps = _profileSpeeds[profile.name];
   }
   Future<void> _initDesktopShell() async {
     if (!_isDesktopPlatform) return;
@@ -893,7 +842,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     setState(() {
       _profiles = updated;
       _profilePings.remove(name);
-      _profileSpeeds.remove(name);
       if (_selectedProfile?.name == name) {
         _selectedProfile = updated.isNotEmpty ? updated.first : null;
         _controller.text = _selectedProfile?.uri ?? '';
@@ -1009,7 +957,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final updated = VpnProfile(name: finalName, uri: newUri);
     final previousName = profile.name;
     final previousPing = _profilePings.remove(previousName);
-    final previousSpeed = _profileSpeeds.remove(previousName);
 
     setState(() {
       _profiles = _profiles.map((p) => p.name == profile.name ? updated : p).toList();
@@ -1019,9 +966,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       }
       if (previousPing != null) {
         _profilePings[updated.name] = previousPing;
-      }
-      if (previousSpeed != null) {
-        _profileSpeeds[updated.name] = previousSpeed;
       }
       _syncMetricsFromProfile(_selectedProfile);
     });
@@ -1577,7 +1521,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final screenWidth = MediaQuery.of(context).size.width;
     final compactWidth = (screenWidth - 60).clamp(200.0, 320.0);
     final pillMaxWidth = isWide ? 240.0 : compactWidth;
-    final canRefreshMetrics = _selectedProfile != null && !_pingInProgress && !_speedInProgress;
+    final canRefreshMetrics = _selectedProfile != null && !_pingInProgress;
     final presetLabel = !_splitEnabled
         ? 'Split tunneling off'
         : (_hasActivePreset ? _activePresetLabel : (_presetDirty ? 'Custom *' : 'Custom'));
@@ -1591,8 +1535,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           children: [
             OutlinedButton.icon(
               onPressed: canRefreshMetrics ? () => _refreshMetrics() : null,
-              icon: Icon(_pingInProgress || _speedInProgress ? Icons.timelapse : Icons.refresh_outlined),
-              label: Text(_pingInProgress || _speedInProgress ? 'Measuring...' : 'Refresh Ping/Speed'),
+              icon: Icon(_pingInProgress ? Icons.timelapse : Icons.refresh_outlined),
+              label: Text(_pingInProgress ? 'Measuring...' : 'Refresh Ping'),
               style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
             ),
             OutlinedButton.icon(
@@ -1657,8 +1601,26 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               header,
+              const SizedBox(height: 16),
+              Center(
+                child: SizedBox(
+                  width: isWide ? 260 : double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isRunning ? _stop : (_profiles.isNotEmpty ? _start : null),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(60),
+                      backgroundColor: _isRunning ? Colors.white : scheme.primary,
+                      foregroundColor: _isRunning ? scheme.primary : Colors.white,
+                      textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                    ),
+                    icon: Icon(_isRunning ? Icons.stop_circle_outlined : Icons.power_settings_new),
+                    label: Text(_isRunning ? 'Отключить' : 'Подключить'),
+                  ),
+                ),
+              ),
               if (compact) ...[
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
                 actions,
               ],
               const SizedBox(height: 20),
@@ -1668,19 +1630,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 children: [
                   _buildInfoPill(context, Icons.account_circle, 'Profile', _selectedProfileLabel, maxWidth: pillMaxWidth),
                   _buildInfoPill(context, Icons.speed_outlined, 'Ping', _pingLabel, maxWidth: pillMaxWidth),
-                  _buildInfoPill(context, Icons.network_check, 'Speed', _speedLabel, maxWidth: pillMaxWidth),
-                  _buildInfoPill(context, Icons.call_split, 'Split', _splitEnabled ? 'Enabled' : 'Disabled', maxWidth: pillMaxWidth),
-                  if (_splitEnabled)
-                    _buildInfoPill(
-                      context,
-                      Icons.bookmarks_outlined,
-                      'Preset',
-                      presetLabel,
-                      maxWidth: pillMaxWidth,
-                      onTap: _showPresetPickerSheet,
-                    ),
-                  _buildInfoPill(context, Icons.cloud_outlined, 'Interface', _interfaceLabel, maxWidth: pillMaxWidth),
-                  _buildInfoPill(context, Icons.folder_outlined, 'Config Path', configLabel, maxWidth: pillMaxWidth),
+                  if (_developerMode) _buildInfoPill(context, Icons.cloud_outlined, 'Interface', _interfaceLabel, maxWidth: pillMaxWidth),
+                  if (_developerMode && _configFile != null)
+                    _buildInfoPill(context, Icons.folder_outlined, 'Config Path', configLabel, maxWidth: pillMaxWidth),
                 ],
               ),
               const SizedBox(height: 14),
@@ -1705,6 +1657,21 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   ),
                 ],
               ),
+              if (_splitEnabled) ...[
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: _hasActivePreset ? _activePresetName : _noPresetValue,
+                  decoration: const InputDecoration(labelText: 'Split preset'),
+                  items: [
+                    DropdownMenuItem(value: _noPresetValue, child: Text(_presetDirty ? 'Custom *' : 'Custom')),
+                    ..._splitPresets.map((p) => DropdownMenuItem(value: p.name, child: Text(p.name))).toList(),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    _handlePresetSelection(value);
+                  },
+                ),
+              ],
             ],
           ),
         );
@@ -1772,10 +1739,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 children: _profiles.map((profile) {
                   final isSelected = _selectedProfile?.name == profile.name;
                   final ping = _profilePings[profile.name];
-                  final speed = _profileSpeeds[profile.name];
                   final metricsParts = <String>[];
                   if (ping != null) metricsParts.add('Ping: $ping ms');
-                  if (speed != null) metricsParts.add('Speed: ${speed.toStringAsFixed(1)} Mbps');
                   final metricsLabel = metricsParts.isEmpty ? 'No measurements yet' : metricsParts.join(' | ');
                   return Container(
                     margin: const EdgeInsets.only(bottom: 10),
@@ -1848,16 +1813,6 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 spacing: 12,
                 runSpacing: 12,
                 children: [
-                  FilledButton.icon(
-                    onPressed: hasProfiles ? (_isRunning ? _stop : _start) : null,
-                    icon: Icon(_isRunning ? Icons.stop_circle_outlined : Icons.power_settings_new),
-                    label: Text(_isRunning ? 'Отключить' : 'Подключить'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-                      backgroundColor: _isRunning ? theme.colorScheme.error : theme.colorScheme.primary,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
                   TextButton.icon(
                     onPressed: _generatedConfig != null ? () => _showConfigDialog(context) : null,
                     icon: const Icon(Icons.receipt_long),
@@ -1872,12 +1827,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 spacing: 16,
                 runSpacing: 12,
                 children: [
-                  _buildInfoPill(context, Icons.route, 'Split Mode', _splitEnabled ? _describeSplitMode() : 'Disabled'),
-                  _buildInfoPill(context, Icons.bookmark_outline, 'Split Preset', _splitEnabled ? _activePresetLabel : 'N/A'),
                   _buildInfoPill(context, Icons.history, 'Log lines', _logLines.length.toString()),
                   if (_parsed != null)
                     _buildInfoPill(context, Icons.language, 'Server', '${_parsed!.host}:${_parsed!.port}'),
-                  if (_configFile != null)
+                  if (_developerMode && _configFile != null)
                     _buildInfoPill(context, Icons.folder_outlined, 'Config Path', _configFile!.path, maxWidth: 240),
                 ],
               ),
