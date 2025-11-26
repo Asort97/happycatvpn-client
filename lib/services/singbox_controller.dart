@@ -149,6 +149,8 @@ class SingBoxController {
       enableApplicationRules: Platform.isWindows,
       hasAndroidPackageRules: Platform.isAndroid && androidPackages.isNotEmpty,
       autoDetectInterface: !Platform.isAndroid,
+      smartRouting: splitConfig.smartRouting,
+      smartDomains: splitConfig.smartDomains,
     );
     _generatedConfig = jsonConfig;
     _configFile = null;

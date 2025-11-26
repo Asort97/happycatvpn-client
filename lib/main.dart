@@ -96,6 +96,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   static const String _trayExitKey = 'exit';
   static const String _noPresetValue = '__none__';
   static const String _splitToggleKey = 'split_tunnel_enabled';
+  static const String _smartRoutingKey = 'smart_routing_enabled';
   int? _pingMs;
   bool _pingInProgress = false;
   bool _splitEnabled = true;
@@ -105,6 +106,17 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   static const String _profileMetricsKey = 'vpn_profile_metrics';
   static const String _profileCounterKey = 'vpn_profile_counter';
   bool _developerMode = false;
+  bool _smartRouting = false;
+  static const List<String> _smartDomainSuffixes = ['ru', 'su', 'xn--p1ai'];
+  static const List<String> _smartDomainList = [
+    'yandex.ru',
+    'mail.ru',
+    'vk.com',
+    'sber.ru',
+    'ozon.ru',
+    'wildberries.ru',
+    'lenta.ru',
+  ];
 
   VlessLink? get _parsed => _singBoxController.parsedLink;
   File? get _configFile => _singBoxController.configFile;
@@ -121,6 +133,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   String get _selectedProfileLabel => _selectedProfile?.name ?? 'Choose server';
   SplitTunnelConfig get _activeSplitConfig => _splitConfigs[_splitMode] ?? _splitConfigs['all']!;
   SplitTunnelConfig get _effectiveSplitConfig => _splitEnabled ? _activeSplitConfig : SplitTunnelConfig(mode: 'all');
+  SplitTunnelConfig get _configForConnection => _effectiveSplitConfig.copyWith(
+        smartRouting: _smartRouting,
+        smartDomains: [..._smartDomainSuffixes, ..._smartDomainList],
+      );
   @override
   void initState() {
     super.initState();
@@ -278,6 +294,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final metricsRaw = prefs.getString(_profileMetricsKey);
     final restoredPings = <String, int>{};
     bool splitEnabled = prefs.getBool(_splitToggleKey) ?? true;
+    _smartRouting = prefs.getBool(_smartRoutingKey) ?? false;
     _developerMode = prefs.getBool('developer_mode') ?? false;
 
     if (metricsRaw != null && metricsRaw.isNotEmpty) {
@@ -345,6 +362,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             if (decoded['enabled'] is bool) {
               splitEnabled = decoded['enabled'] as bool;
             }
+            if (decoded['smartRouting'] is bool) {
+              _smartRouting = decoded['smartRouting'] as bool;
+            }
 
             if (decoded['presets'] is List) {
               restoredPresets = (decoded['presets'] as List)
@@ -368,11 +388,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
 
     if (!mounted) return;
+    final smartRoutingFlag = _smartRouting;
     setState(() {
       _profiles = profiles;
       _profileNameCounter = math.max(storedCounter, _findMaxProfileIndex(profiles));
       _selectedProfile = selected;
       _syncMetricsFromProfile(selected);
+      _smartRouting = smartRoutingFlag;
       if (restoredMap != null) {
         for (final entry in _splitConfigs.keys.toList()) {
           final restored = restoredMap[entry];
@@ -476,10 +498,12 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       'presets': _splitPresets.map((preset) => preset.toJson()).toList(),
       'activePreset': _activePresetName,
       'enabled': _splitEnabled,
+      'smartRouting': _smartRouting,
     });
     await prefs.setString(_splitConfigPrefsKey, payload);
     await prefs.remove(_legacySplitConfigKey);
     await prefs.setBool(_splitToggleKey, _splitEnabled);
+    await prefs.setBool(_smartRoutingKey, _smartRouting);
   }
 
   void _updateActiveSplitConfig(SplitTunnelConfig config) {
@@ -1065,7 +1089,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
 
     final result = await _singBoxController.connect(
       rawUri: _controller.text,
-      splitConfig: _effectiveSplitConfig,
+      splitConfig: _configForConnection,
       onStatus: (value) {
         if (!mounted) return;
         setState(() => _status = value);
@@ -1212,6 +1236,16 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
+                SwitchListTile(
+                  title: const Text('Smart Routing'),
+                  subtitle: const Text('Automatically bypass Russian websites to increase speed and stability.'),
+                  value: _smartRouting,
+                  onChanged: (value) {
+                    setState(() => _smartRouting = value);
+                    unawaited(_persistSplitState());
+                  },
+                ),
+                const SizedBox(height: 8),
                 if (!_splitEnabled)
                   Card(
                     color: theme.colorScheme.errorContainer.withOpacity(0.2),

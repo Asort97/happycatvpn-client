@@ -15,6 +15,8 @@ String generateSingBoxConfig(
   bool enableApplicationRules = false,
   bool hasAndroidPackageRules = false,
   bool autoDetectInterface = true,
+  bool smartRouting = false,
+  List<String> smartDomains = const <String>[],
 }) {
   final p = link.params;
   final transportType = p['type']; // например ws, tcp, grpc, h2
@@ -90,6 +92,8 @@ String generateSingBoxConfig(
       ? _buildApplicationRules(splitConfig, vpnTag)
       : const <Map<String, dynamic>>[];
 
+  final smartRules = smartRouting ? _buildSmartRules(smartDomains, vpnTag) : const <Map<String, dynamic>>[];
+
   final config = {
     'log': {
       'level': 'info',
@@ -131,6 +135,7 @@ String generateSingBoxConfig(
       'auto_detect_interface': autoDetectInterface,
       'final': _getDefaultOutbound(splitConfig, vpnTag, hasAndroidPackageRules: hasAndroidPackageRules),
       'rules': [
+        ...smartRules,
         ..._buildRouteRules(splitConfig, vpnTag),
         ...appRules,
       ],
@@ -181,6 +186,29 @@ List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpn
   }
   
   return rules;
+}
+
+List<Map<String, dynamic>> _buildSmartRules(List<String> smartDomains, String vpnTag) {
+  if (smartDomains.isEmpty) return const <Map<String, dynamic>>[];
+  final domainSuffix = <String>[];
+  final domains = <String>[];
+  for (final entry in smartDomains) {
+    final value = entry.trim();
+    if (value.isEmpty) continue;
+    if (value.startsWith('.')) {
+      domainSuffix.add(value.replaceFirst('.', ''));
+    } else if (!value.contains('.')) {
+      domainSuffix.add(value);
+    } else {
+      domains.add(value);
+    }
+  }
+  final rule = <String, dynamic>{
+    if (domainSuffix.isNotEmpty) 'domain_suffix': domainSuffix,
+    if (domains.isNotEmpty) 'domain': domains,
+    'outbound': 'direct',
+  };
+  return [rule];
 }
 
 List<Map<String, dynamic>> _buildApplicationRules(SplitTunnelConfig config, String vpnTag) {
