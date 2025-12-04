@@ -7,6 +7,7 @@ import 'singbox_binary_manager.dart';
 import 'windows_tun_guard.dart';
 import 'windivert_manager.dart';
 import 'wintun_manager.dart';
+import '../services/smart_route_engine.dart';
 import '../vless/config_generator.dart';
 import '../vless/vless_parser.dart';
 
@@ -15,15 +16,23 @@ class SingBoxStartResult {
   final String? errorMessage;
   final bool requiresAdmin;
 
-  const SingBoxStartResult._({required this.success, this.errorMessage, this.requiresAdmin = false});
+  const SingBoxStartResult._({
+    required this.success,
+    this.errorMessage,
+    this.requiresAdmin = false,
+  });
 
-  factory SingBoxStartResult.success() => const SingBoxStartResult._(success: true);
+  factory SingBoxStartResult.success() =>
+      const SingBoxStartResult._(success: true);
 
-  factory SingBoxStartResult.failure(String message, {bool requiresAdmin = false}) => SingBoxStartResult._(
-        success: false,
-        errorMessage: message,
-        requiresAdmin: requiresAdmin,
-      );
+  factory SingBoxStartResult.failure(
+    String message, {
+    bool requiresAdmin = false,
+  }) => SingBoxStartResult._(
+    success: false,
+    errorMessage: message,
+    requiresAdmin: requiresAdmin,
+  );
 }
 
 class SingBoxController {
@@ -32,18 +41,18 @@ class SingBoxController {
     WindowsTunGuard? tunGuard,
     SingBoxBinaryManager? binaryManager,
     AndroidVpnController? androidController,
-      WinDivertManager? winDivertManager,
-    })  : _wintunManager = wintunManager ?? WintunManager(),
-        _tunGuard = tunGuard ?? WindowsTunGuard(),
-        _binaryManager = binaryManager ?? SingBoxBinaryManager(),
-      _androidController = androidController ?? AndroidVpnController(),
-      _winDivertManager = winDivertManager ?? WinDivertManager();
+    WinDivertManager? winDivertManager,
+  }) : _wintunManager = wintunManager ?? WintunManager(),
+       _tunGuard = tunGuard ?? WindowsTunGuard(),
+       _binaryManager = binaryManager ?? SingBoxBinaryManager(),
+       _androidController = androidController ?? AndroidVpnController(),
+       _winDivertManager = winDivertManager ?? WinDivertManager();
 
   final WintunManager _wintunManager;
   final WindowsTunGuard _tunGuard;
   final SingBoxBinaryManager _binaryManager;
   final AndroidVpnController _androidController;
-    final WinDivertManager _winDivertManager;
+  final WinDivertManager _winDivertManager;
 
   Process? _process;
   StreamSubscription<String>? _stdoutSub;
@@ -70,13 +79,15 @@ class SingBoxController {
     return 'Android VPN';
   }
 
-  bool get isRunning => Platform.isAndroid ? _androidConnected : _process != null;
+  bool get isRunning =>
+      Platform.isAndroid ? _androidConnected : _process != null;
 
   Future<bool> isWintunAvailable() => _wintunManager.isWintunAvailable();
 
   Future<SingBoxStartResult> connect({
     required String rawUri,
     required SplitTunnelConfig splitConfig,
+    SmartRouteEngine? smartRouteEngine,
     void Function(String status)? onStatus,
     void Function(String log)? onLog,
   }) async {
@@ -113,7 +124,10 @@ class SingBoxController {
         final message = guardResult.requiresElevation
             ? '❌ Нужны права администратора для управления TUN интерфейсом'
             : (guardResult.error ?? 'Не удалось подготовить TUN интерфейс');
-        return SingBoxStartResult.failure(message, requiresAdmin: guardResult.requiresElevation);
+        return SingBoxStartResult.failure(
+          message,
+          requiresAdmin: guardResult.requiresElevation,
+        );
       }
 
       inboundTag = guardResult.inboundTag;
@@ -122,7 +136,11 @@ class SingBoxController {
       _activeInterfaceName = interfaceName;
 
       if (guardResult.leftoverAdapters.isNotEmpty) {
-        unawaited(_tunGuard.cleanupAdapters(guardResult.leftoverAdapters).then(_emitLogs));
+        unawaited(
+          _tunGuard
+              .cleanupAdapters(guardResult.leftoverAdapters)
+              .then(_emitLogs),
+        );
       }
 
       _notifyStatus('Подготовка WinDivert');
@@ -136,7 +154,9 @@ class SingBoxController {
       _activeInterfaceName = null;
     }
 
-    final androidPackages = Platform.isAndroid ? _extractAndroidPackages(splitConfig) : <String>[];
+    final androidPackages = Platform.isAndroid
+        ? _extractAndroidPackages(splitConfig)
+        : <String>[];
 
     _notifyStatus('Генерация конфига');
     final jsonConfig = generateSingBoxConfig(
@@ -162,8 +182,12 @@ class SingBoxController {
         return SingBoxStartResult.failure('Разрешение отклонено пользователем');
       }
 
-      final includePackages = splitConfig.mode == 'whitelist' ? androidPackages : <String>[];
-      final excludePackages = splitConfig.mode == 'blacklist' ? androidPackages : <String>[];
+      final includePackages = splitConfig.mode == 'whitelist'
+          ? androidPackages
+          : <String>[];
+      final excludePackages = splitConfig.mode == 'blacklist'
+          ? androidPackages
+          : <String>[];
 
       _notifyStatus('Запуск Libbox сервиса');
       await _androidController.startVpn(
@@ -194,15 +218,15 @@ class SingBoxController {
         final dllDir = winDivertPaths.directory;
         final existingPath = environment['PATH'];
         environment['PATH'] = (existingPath == null || existingPath.isEmpty)
-          ? dllDir
-          : '$dllDir;$existingPath';
+            ? dllDir
+            : '$dllDir;$existingPath';
       }
 
-      final process = await Process.start(
-        exePath,
-        ['run', '-c', cfgFile.path],
-        environment: environment,
-      );
+      final process = await Process.start(exePath, [
+        'run',
+        '-c',
+        cfgFile.path,
+      ], environment: environment);
       _process = process;
       _attachProcessHandlers(process, interfaceName);
       _notifyStatus('Подключено (TUN: $interfaceName)');
@@ -264,10 +288,14 @@ class SingBoxController {
     _stdoutSub?.cancel();
     _stderrSub?.cancel();
 
-    _stdoutSub = process.stdout.transform(SystemEncoding().decoder).listen((data) {
+    _stdoutSub = process.stdout.transform(SystemEncoding().decoder).listen((
+      data,
+    ) {
       _emitChunk(data, isError: false);
     });
-    _stderrSub = process.stderr.transform(SystemEncoding().decoder).listen((data) {
+    _stderrSub = process.stderr.transform(SystemEncoding().decoder).listen((
+      data,
+    ) {
       _emitChunk(data, isError: true);
     });
 
@@ -300,9 +328,13 @@ class SingBoxController {
     for (final raw in lines) {
       final line = raw.trim();
       if (line.isEmpty) continue;
-      if (isError && (line.contains('Access is denied') || line.contains('configure tun interface'))) {
+      if (isError &&
+          (line.contains('Access is denied') ||
+              line.contains('configure tun interface'))) {
         _accessDeniedDetected = true;
-        _notifyStatus('❌ Нужны права администратора! Запустите приложение от имени администратора');
+        _notifyStatus(
+          '❌ Нужны права администратора! Запустите приложение от имени администратора',
+        );
       }
       _logSink?.call(isError ? '[ERR] $line' : line);
     }

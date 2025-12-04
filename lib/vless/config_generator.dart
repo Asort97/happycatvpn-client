@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'vless_parser.dart';
 
 import '../models/split_tunnel_config.dart';
@@ -46,7 +46,8 @@ String generateSingBoxConfig(
 
   if (flow != null && flow.isNotEmpty) {
     outbound['flow'] = flow;
-    if ((packetEncoding == null || packetEncoding.isEmpty) && flow.contains('vision')) {
+    if ((packetEncoding == null || packetEncoding.isEmpty) &&
+        flow.contains('vision')) {
       outbound['packet_encoding'] = 'xudp';
     }
   }
@@ -60,10 +61,7 @@ String generateSingBoxConfig(
       'enabled': true,
       'server_name': serverName,
       if (alpn.isNotEmpty) 'alpn': alpn,
-      'utls': {
-        'enabled': true,
-        'fingerprint': fingerprint,
-      }
+      'utls': {'enabled': true, 'fingerprint': fingerprint},
     };
     if (isReality) {
       final shortIdList = (realityShortId ?? '')
@@ -92,23 +90,22 @@ String generateSingBoxConfig(
       ? _buildApplicationRules(splitConfig, vpnTag)
       : const <Map<String, dynamic>>[];
 
-  final smartRules = smartRouting ? _buildSmartRules(smartDomains, vpnTag) : const <Map<String, dynamic>>[];
+  final smartRules = smartRouting
+      ? _buildSmartRules(smartDomains, vpnTag)
+      : const <Map<String, dynamic>>[];
 
   final config = {
-    'log': {
-      'level': 'info',
-      'timestamp': true,
-    },
+    'log': {'level': 'info', 'timestamp': true},
     'dns': {
       'servers': [
         {
           'tag': 'dns-remote',
           'address': '1.1.1.1',
+          'strategy': 'ipv4_only',
         },
         {
           'tag': 'dns-local',
           'address': 'local',
-          'detour': 'direct',
         },
       ],
       'final': 'dns-remote',
@@ -119,29 +116,57 @@ String generateSingBoxConfig(
         'tag': inboundTag,
         'interface_name': interfaceName,
         'stack': tunStack,
-        'mtu': 1400,
+        'mtu': 1500,
         'address': addresses ?? const ['172.19.0.1/30'],
         'auto_route': true,
         'strict_route': false,
         'sniff': true,
         'sniff_override_destination': false,
-      }
+      },
     ],
     'outbounds': [
-      outbound,
+      _optimizeOutbound(outbound, vpnTag),
       {'type': 'direct', 'tag': 'direct'},
     ],
     'route': {
       'auto_detect_interface': autoDetectInterface,
-      'final': _getDefaultOutbound(splitConfig, vpnTag, hasAndroidPackageRules: hasAndroidPackageRules),
+      'default_domain_resolver': 'dns-remote',
+      'final': _getDefaultOutbound(
+        splitConfig,
+        vpnTag,
+        hasAndroidPackageRules: hasAndroidPackageRules,
+      ),
       'rules': [
+        {
+          'inbound': [inboundTag],
+          'port': 53,
+          'network': 'udp',
+          'outbound': 'dns-remote',
+        },
+        {
+          'inbound': [inboundTag],
+          'port': 53,
+          'network': 'tcp',
+          'outbound': 'dns-remote',
+        },
+
         ...smartRules,
         ..._buildRouteRules(splitConfig, vpnTag),
         ...appRules,
       ],
-    }
+    },
   };
   return const JsonEncoder.withIndent('  ').convert(config);
+}
+
+Map<String, dynamic> _optimizeOutbound(
+  Map<String, dynamic> outbound,
+  String vpnTag,
+) {
+  // ⚡ Минимальная оптимизация: TCP Fast Open
+  final optimized = Map<String, dynamic>.from(outbound);
+  optimized['tcp_fast_open'] = true;
+  return optimized;
 }
 
 String _getDefaultOutbound(
@@ -159,9 +184,12 @@ String _getDefaultOutbound(
   return vpnTag; // all или blacklist — по умолчанию через VPN
 }
 
-List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpnTag) {
+List<Map<String, dynamic>> _buildRouteRules(
+  SplitTunnelConfig config,
+  String vpnTag,
+) {
   final rules = <Map<String, dynamic>>[];
-  
+
   if (config.domains.isEmpty) return rules;
 
   final targets = _RouteTargets.fromEntries(config.domains);
@@ -184,11 +212,14 @@ List<Map<String, dynamic>> _buildRouteRules(SplitTunnelConfig config, String vpn
       });
     }
   }
-  
+
   return rules;
 }
 
-List<Map<String, dynamic>> _buildSmartRules(List<String> smartDomains, String vpnTag) {
+List<Map<String, dynamic>> _buildSmartRules(
+  List<String> smartDomains,
+  String vpnTag,
+) {
   if (smartDomains.isEmpty) return const <Map<String, dynamic>>[];
   final domainSuffix = <String>[];
   final domains = <String>[];
@@ -211,8 +242,13 @@ List<Map<String, dynamic>> _buildSmartRules(List<String> smartDomains, String vp
   return [rule];
 }
 
-List<Map<String, dynamic>> _buildApplicationRules(SplitTunnelConfig config, String vpnTag) {
-  if (config.mode == 'all' || config.applications.isEmpty) return const <Map<String, dynamic>>[];
+List<Map<String, dynamic>> _buildApplicationRules(
+  SplitTunnelConfig config,
+  String vpnTag,
+) {
+  if (config.mode == 'all' || config.applications.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
 
   final cleaned = config.applications
       .map((path) => path.trim())
@@ -224,10 +260,7 @@ List<Map<String, dynamic>> _buildApplicationRules(SplitTunnelConfig config, Stri
 
   final outbound = config.mode == 'whitelist' ? vpnTag : 'direct';
   return cleaned
-      .map((rule) => {
-            rule.key: rule.value,
-            'outbound': outbound,
-          })
+      .map((rule) => {rule.key: rule.value, 'outbound': outbound})
       .toList();
 }
 
@@ -265,8 +298,13 @@ Map<String, dynamic>? _buildTransport(
   final normalizedType = transportType?.toLowerCase();
   final headerHost = _firstParam(params, ['host', 'Host']) ?? link.host;
 
-  if (normalizedType == null || normalizedType.isEmpty || normalizedType == 'tcp') {
-    final headerType = _firstParam(params, ['headerType', 'header_type'])?.toLowerCase();
+  if (normalizedType == null ||
+      normalizedType.isEmpty ||
+      normalizedType == 'tcp') {
+    final headerType = _firstParam(params, [
+      'headerType',
+      'header_type',
+    ])?.toLowerCase();
     if (headerType == 'http') {
       return _buildHttpTransport(params, path, headerHost, serverName);
     }
@@ -281,18 +319,24 @@ Map<String, dynamic>? _buildTransport(
         'headers': {'Host': headerHost},
       };
     case 'grpc':
-      final serviceName = _firstParam(params, ['serviceName', 'service_name', 'servicename']) ??
+      final serviceName =
+          _firstParam(params, ['serviceName', 'service_name', 'servicename']) ??
           path?.replaceFirst(RegExp(r'^/'), '');
       final authority = _firstParam(params, ['authority']) ?? headerHost;
-      final multiMode = _parseBool(_firstParam(params, ['multiMode', 'multimode']));
+      final multiMode = _parseBool(
+        _firstParam(params, ['multiMode', 'multimode']),
+      );
       final idleTimeout = _firstParam(params, ['idle_timeout', 'idleTimeout']);
       return {
         'type': 'grpc',
-        if (serviceName != null && serviceName.isNotEmpty) 'service_name': serviceName,
+        if (serviceName != null && serviceName.isNotEmpty)
+          'service_name': serviceName,
         if (authority.isNotEmpty) 'authority': authority,
         if (multiMode != null) 'multi_mode': multiMode,
-        if (idleTimeout != null && idleTimeout.isNotEmpty) 'idle_timeout': idleTimeout,
-        if (params['mode'] != null && params['mode']!.isNotEmpty) 'mode': params['mode'],
+        if (idleTimeout != null && idleTimeout.isNotEmpty)
+          'idle_timeout': idleTimeout,
+        if (params['mode'] != null && params['mode']!.isNotEmpty)
+          'mode': params['mode'],
       };
     case 'http':
     case 'h2':
@@ -304,7 +348,8 @@ Map<String, dynamic>? _buildTransport(
         'headers': {'Host': headerHost},
       };
     case 'quic':
-      final security = _firstParam(params, ['quicSecurity', 'quic_security']) ?? 'none';
+      final security =
+          _firstParam(params, ['quicSecurity', 'quic_security']) ?? 'none';
       final key = _firstParam(params, ['key', 'quicKey', 'quic_key']);
       return {
         'type': 'quic',
@@ -406,19 +451,20 @@ class _RouteTargets {
   final List<String> geosite;
   final List<String> ipCidrs;
 
-  bool get hasDomainRules => domainFull.isNotEmpty ||
+  bool get hasDomainRules =>
+      domainFull.isNotEmpty ||
       domainSuffix.isNotEmpty ||
       domainKeyword.isNotEmpty ||
       domainRegex.isNotEmpty ||
       geosite.isNotEmpty;
 
   Map<String, dynamic> toSingBoxFields() => {
-        if (domainFull.isNotEmpty) 'domain': domainFull,
-        if (domainSuffix.isNotEmpty) 'domain_suffix': domainSuffix,
-        if (domainKeyword.isNotEmpty) 'domain_keyword': domainKeyword,
-        if (domainRegex.isNotEmpty) 'domain_regex': domainRegex,
-        if (geosite.isNotEmpty) 'geosite': geosite,
-      };
+    if (domainFull.isNotEmpty) 'domain': domainFull,
+    if (domainSuffix.isNotEmpty) 'domain_suffix': domainSuffix,
+    if (domainKeyword.isNotEmpty) 'domain_keyword': domainKeyword,
+    if (domainRegex.isNotEmpty) 'domain_regex': domainRegex,
+    if (geosite.isNotEmpty) 'geosite': geosite,
+  };
 
   static _RouteTargets fromEntries(List<String> entries) {
     final domainFull = <String>[];
@@ -448,25 +494,43 @@ class _RouteTargets {
         continue;
       }
 
-      final suffix = _stripPrefix(lower, value, ['domain-suffix:', 'domain_suffix:', 'suffix:']);
+      final suffix = _stripPrefix(lower, value, [
+        'domain-suffix:',
+        'domain_suffix:',
+        'suffix:',
+      ]);
       if (suffix != null) {
         domainSuffix.add(suffix);
         continue;
       }
 
-      final keyword = _stripPrefix(lower, value, ['domain-keyword:', 'domain_keyword:', 'keyword:']);
+      final keyword = _stripPrefix(lower, value, [
+        'domain-keyword:',
+        'domain_keyword:',
+        'keyword:',
+      ]);
       if (keyword != null) {
         domainKeyword.add(keyword);
         continue;
       }
 
-      final full = _stripPrefix(lower, value, ['domain-full:', 'domain_full:', 'full:', 'domain:']);
+      final full = _stripPrefix(lower, value, [
+        'domain-full:',
+        'domain_full:',
+        'full:',
+        'domain:',
+      ]);
       if (full != null) {
         domainFull.add(full);
         continue;
       }
 
-      final regex = _stripPrefix(lower, value, ['domain-regex:', 'domain_regex:', 'regexp:', 'regex:']);
+      final regex = _stripPrefix(lower, value, [
+        'domain-regex:',
+        'domain_regex:',
+        'regexp:',
+        'regex:',
+      ]);
       if (regex != null) {
         domainRegex.add(regex);
         continue;
@@ -487,7 +551,9 @@ class _RouteTargets {
   }
 
   static bool _looksLikeIpv4(String value) {
-    final ipv4 = RegExp(r'^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$');
+    final ipv4 = RegExp(
+      r'^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$',
+    );
     return ipv4.hasMatch(value);
   }
 
@@ -509,7 +575,11 @@ class _RouteTargets {
     return cidr.hasMatch(value);
   }
 
-  static String? _stripPrefix(String lower, String original, List<String> prefixes) {
+  static String? _stripPrefix(
+    String lower,
+    String original,
+    List<String> prefixes,
+  ) {
     for (final prefix in prefixes) {
       if (lower.startsWith(prefix)) {
         return original.substring(prefix.length);
