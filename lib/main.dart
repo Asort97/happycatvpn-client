@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -12,6 +12,10 @@ import 'package:window_manager/window_manager.dart';
 import 'vless/vless_parser.dart';
 import 'models/split_tunnel_config.dart';
 import 'models/split_tunnel_preset.dart';
+import 'models/connectivity_test.dart';
+import 'services/connectivity_targets.dart';
+import 'services/connectivity_tester.dart';
+import 'services/smart_route_engine.dart';
 import 'services/singbox_controller.dart';
 import 'models/vpn_profile.dart';
 
@@ -51,7 +55,9 @@ class VpnApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF050608),
         useMaterial3: true,
         inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.all(Radius.circular(16)),
+          ),
         ),
       ),
       home: const VlessHomePage(),
@@ -66,7 +72,8 @@ class VlessHomePage extends StatefulWidget {
   State<VlessHomePage> createState() => _VlessHomePageState();
 }
 
-class _VlessHomePageState extends State<VlessHomePage> with TrayListener, WindowListener {
+class _VlessHomePageState extends State<VlessHomePage>
+    with TrayListener, WindowListener {
   final TextEditingController _controller = TextEditingController();
   String _status = 'Idle';
   final Map<String, SplitTunnelConfig> _splitConfigs = {
@@ -107,36 +114,44 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   static const String _profileCounterKey = 'vpn_profile_counter';
   bool _developerMode = false;
   bool _smartRouting = false;
-  static const List<String> _smartDomainSuffixes = ['ru', 'su', 'xn--p1ai'];
-  static const List<String> _smartDomainList = [
-    'yandex.ru',
-    'mail.ru',
-    'vk.com',
-    'sber.ru',
-    'ozon.ru',
-    'wildberries.ru',
-    'lenta.ru',
-  ];
+  final SmartRouteEngine _smartRouteEngine = SmartRouteEngine();
+  final ConnectivityTester _connectivityTester = ConnectivityTester();
+  late final List<ConnectivityTestTarget> _connectivityTargets =
+      buildDefaultConnectivityTargets();
+  final Map<String, ConnectivityTestResult> _connectivityResults = {};
+  bool _isConnectivityTesting = false;
+  int _connectivityCompleted = 0;
+  DateTime? _connectivityLastRun;
+  bool _cancelConnectivity = false;
 
   VlessLink? get _parsed => _singBoxController.parsedLink;
   File? get _configFile => _singBoxController.configFile;
   String? get _generatedConfig => _singBoxController.generatedConfig;
-  bool get _isDesktopPlatform => Platform.isWindows || Platform.isLinux || Platform.isMacOS;
-  bool get _hasActivePreset => _activePresetName != null && _splitPresets.any((preset) => preset.name == _activePresetName);
+  bool get _isDesktopPlatform =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+  bool get _hasActivePreset =>
+      _activePresetName != null &&
+      _splitPresets.any((preset) => preset.name == _activePresetName);
   String get _activePresetLabel {
     if (_activePresetName == null) {
-      return _presetDirty ? 'Custom *' : 'Custom';
+      return _presetDirty ? 'Свои *' : 'Свои';
     }
     return _presetDirty ? '${_activePresetName!}*' : _activePresetName!;
   }
-  String get _pingLabel => _pingInProgress ? 'Measuring...' : (_pingMs != null ? '$_pingMs ms' : '--');
-  String get _selectedProfileLabel => _selectedProfile?.name ?? 'Choose server';
-  SplitTunnelConfig get _activeSplitConfig => _splitConfigs[_splitMode] ?? _splitConfigs['all']!;
-  SplitTunnelConfig get _effectiveSplitConfig => _splitEnabled ? _activeSplitConfig : SplitTunnelConfig(mode: 'all');
+
+  String get _pingLabel => _pingInProgress
+      ? 'Измерение...'
+      : (_pingMs != null ? '$_pingMs мс' : '--');
+  String get _selectedProfileLabel =>
+      _selectedProfile?.name ?? 'Выберите сервер';
+  SplitTunnelConfig get _activeSplitConfig =>
+      _splitConfigs[_splitMode] ?? _splitConfigs['all']!;
+  SplitTunnelConfig get _effectiveSplitConfig =>
+      _splitEnabled ? _activeSplitConfig : SplitTunnelConfig(mode: 'all');
   SplitTunnelConfig get _configForConnection => _effectiveSplitConfig.copyWith(
-        smartRouting: _smartRouting,
-        smartDomains: [..._smartDomainSuffixes, ..._smartDomainList],
-      );
+    smartRouting: _smartRouting,
+    smartDomains: _smartRouteEngine.exportLegacyRuleEntries(),
+  );
   @override
   void initState() {
     super.initState();
@@ -176,11 +191,15 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
         includeSystemApps: false,
         onlyAppsWithLaunchIntent: true,
       );
-      apps.sort((a, b) => a.appName.toLowerCase().compareTo(b.appName.toLowerCase()));
+      apps.sort(
+        (a, b) => a.appName.toLowerCase().compareTo(b.appName.toLowerCase()),
+      );
       if (!mounted) return;
       setState(() {
         _androidInstalledApps = apps;
-        _androidAppLabels = {for (final app in apps) app.packageName: app.appName};
+        _androidAppLabels = {
+          for (final app in apps) app.packageName: app.appName,
+        };
         _androidAppsLoaded = true;
         _androidAppsLoading = false;
         _androidAppLoadError = null;
@@ -202,7 +221,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     if (!mounted) return;
     final apps = _androidInstalledApps;
     if (apps.isEmpty) {
-      _showFastSnack('Список приложений пуст. Обновите список и попробуйте снова.');
+      _showFastSnack(
+        'Список приложений пуст. Обновите список и попробуйте снова.',
+      );
       return;
     }
     final package = await showModalBottomSheet<String>(
@@ -230,7 +251,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               label: const Text('Выбрать приложение из списка'),
             ),
             TextButton.icon(
-              onPressed: _androidAppsLoading ? null : () => _loadAndroidApps(force: true),
+              onPressed: _androidAppsLoading
+                  ? null
+                  : () => _loadAndroidApps(force: true),
               icon: const Icon(Icons.refresh_outlined),
               label: const Text('Обновить список'),
             ),
@@ -249,7 +272,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
         if (_androidAppLoadError != null)
           Text(
             'Не удалось загрузить приложения: $_androidAppLoadError',
-            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+            ),
           )
         else
           Text(
@@ -334,7 +359,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
     selected ??= profiles.isNotEmpty ? profiles.first : null;
 
-    final rawState = prefs.getString(_splitConfigPrefsKey) ?? prefs.getString(_legacySplitConfigKey);
+    final rawState =
+        prefs.getString(_splitConfigPrefsKey) ??
+        prefs.getString(_legacySplitConfigKey);
     String? restoredMode;
     Map<String, SplitTunnelConfig>? restoredMap;
     List<SplitTunnelPreset>? restoredPresets;
@@ -373,12 +400,19 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   .toList();
             }
           } else {
-            final legacyDomains = _normalizeStringList(decoded['domains']) ?? const <String>[];
-            final legacyApps = _normalizeStringList(decoded['applications']) ?? const <String>[];
+            final legacyDomains =
+                _normalizeStringList(decoded['domains']) ?? const <String>[];
+            final legacyApps =
+                _normalizeStringList(decoded['applications']) ??
+                const <String>[];
             final mode = _normalizeSplitMode(decoded['mode']?.toString());
             restoredMode = mode;
             restoredMap = {
-              mode: SplitTunnelConfig(mode: mode, domains: legacyDomains, applications: legacyApps),
+              mode: SplitTunnelConfig(
+                mode: mode,
+                domains: legacyDomains,
+                applications: legacyApps,
+              ),
             };
           }
         }
@@ -391,14 +425,18 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final smartRoutingFlag = _smartRouting;
     setState(() {
       _profiles = profiles;
-      _profileNameCounter = math.max(storedCounter, _findMaxProfileIndex(profiles));
+      _profileNameCounter = math.max(
+        storedCounter,
+        _findMaxProfileIndex(profiles),
+      );
       _selectedProfile = selected;
       _syncMetricsFromProfile(selected);
       _smartRouting = smartRoutingFlag;
       if (restoredMap != null) {
         for (final entry in _splitConfigs.keys.toList()) {
           final restored = restoredMap[entry];
-          _splitConfigs[entry] = (restored ?? SplitTunnelConfig(mode: entry)).copyWith(mode: entry);
+          _splitConfigs[entry] = (restored ?? SplitTunnelConfig(mode: entry))
+              .copyWith(mode: entry);
         }
       }
       if (restoredMode != null) {
@@ -457,7 +495,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     if (_profiles.isEmpty) {
       await prefs.remove('vpn_profiles');
     } else {
-      await prefs.setString('vpn_profiles', VpnProfile.listToJsonString(_profiles));
+      await prefs.setString(
+        'vpn_profiles',
+        VpnProfile.listToJsonString(_profiles),
+      );
     }
     await prefs.setInt(_profileCounterKey, _profileNameCounter);
   }
@@ -479,7 +520,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
     final payload = <String, Map<String, dynamic>>{};
     for (final entry in _profilePings.entries) {
-      payload.putIfAbsent(entry.key, () => <String, dynamic>{})['ping'] = entry.value;
+      payload.putIfAbsent(entry.key, () => <String, dynamic>{})['ping'] =
+          entry.value;
     }
     await prefs.setString(_profileMetricsKey, jsonEncode(payload));
   }
@@ -491,7 +533,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
 
   Future<void> _persistSplitState() async {
     final prefs = await SharedPreferences.getInstance();
-    final configsPayload = _splitConfigs.map((key, value) => MapEntry(key, value.copyWith(mode: key).toJson()));
+    final configsPayload = _splitConfigs.map(
+      (key, value) => MapEntry(key, value.copyWith(mode: key).toJson()),
+    );
     final payload = jsonEncode({
       'mode': _splitMode,
       'configs': configsPayload,
@@ -553,7 +597,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     for (var i = 0; i < attempts; i++) {
       final sw = Stopwatch()..start();
       try {
-        final socket = await Socket.connect(host, port, timeout: const Duration(seconds: 3));
+        final socket = await Socket.connect(
+          host,
+          port,
+          timeout: const Duration(seconds: 3),
+        );
         results.add(sw.elapsedMilliseconds);
         socket.destroy();
       } catch (_) {
@@ -591,9 +639,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     });
     await _persistProfileMetrics();
     if (!silent && ping != null) {
-      _showFastSnack('Ping обновлен');
+      _showFastSnack('Метрики обновлены');
     }
   }
+
   void _syncMetricsFromProfile(VpnProfile? profile) {
     if (profile == null) {
       _pingMs = null;
@@ -601,6 +650,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
     _pingMs = _profilePings[profile.name];
   }
+
   Future<void> _initDesktopShell() async {
     if (!_isDesktopPlatform) return;
     await windowManager.setPreventClose(true);
@@ -612,11 +662,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final iconPath = await _prepareTrayIconFile();
     await _trayManager.setIcon(iconPath);
     await _trayManager.setToolTip('HappyCat VPN Client');
-    final menu = Menu(items: [
-      MenuItem(key: _trayShowKey, label: 'Показать окно'),
-      MenuItem.separator(),
-      MenuItem(key: _trayExitKey, label: 'Выход'),
-    ]);
+    final menu = Menu(
+      items: [
+        MenuItem(key: _trayShowKey, label: 'Показать окно'),
+        MenuItem.separator(),
+        MenuItem(key: _trayExitKey, label: 'Выход'),
+      ],
+    );
     await _trayManager.setContextMenu(menu);
     _trayInitialized = true;
   }
@@ -700,13 +752,15 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       applications: List<String>.from(_activeSplitConfig.applications),
     );
     setState(() {
-      final remaining = _splitPresets.where((p) => p.name != preset.name).toList();
+      final remaining = _splitPresets
+          .where((p) => p.name != preset.name)
+          .toList();
       _splitPresets = [preset, ...remaining];
       _activePresetName = preset.name;
       _presetDirty = false;
     });
     unawaited(_persistSplitState());
-    _showFastSnack('Пресет "${preset.name}" сохранен');
+    _showFastSnack('Text');
   }
 
   void _overwriteActivePreset() {
@@ -724,7 +778,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
       _presetDirty = false;
     });
     unawaited(_persistSplitState());
-    _showFastSnack('Пресет "${preset.name}" перезаписан');
+    _showFastSnack('Пресет обновлён');
   }
 
   void _applyPreset(SplitTunnelPreset preset, {bool silent = false}) {
@@ -741,7 +795,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     });
     unawaited(_persistSplitState());
     if (!silent) {
-      _showFastSnack('Пресет "${preset.name}" применен');
+      _showFastSnack('Пресет применён');
     }
   }
 
@@ -763,31 +817,40 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   }
 
   Future<void> _confirmDeletePreset(SplitTunnelPreset preset) async {
-    final shouldDelete = await showDialog<bool>(
+    final shouldDelete =
+        await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Удалить пресет?'),
-            content: Text('Пресет "${preset.name}" будет удален без возможности восстановления.'),
+            title: const Text('Удалить пресет'),
+            content: Text('Удалить пресет "${preset.name}"?'),
             actions: [
-              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Отмена')),
-              FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Удалить')),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Удалить'),
+              ),
             ],
           ),
         ) ??
         false;
     if (!shouldDelete) return;
     setState(() {
-      _splitPresets = _splitPresets.where((p) => p.name != preset.name).toList();
+      _splitPresets = _splitPresets
+          .where((p) => p.name != preset.name)
+          .toList();
       if (_activePresetName == preset.name) {
         _activePresetName = null;
         _presetDirty = false;
       }
     });
     unawaited(_persistSplitState());
-    _showFastSnack('Пресет "${preset.name}" удален');
+    _showFastSnack('Пресет удалён');
   }
 
-  String _defaultPresetName() => _ensureUniquePresetName('Пресет ${_splitPresets.length + 1}');
+  String _defaultPresetName() => _ensureUniquePresetName('Новый пресет');
 
   String _ensureUniquePresetName(String base) {
     if (_splitPresets.every((preset) => preset.name != base)) return base;
@@ -811,19 +874,22 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           children: [
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 10),
-              child: Text('Split Tunneling Presets', style: TextStyle(fontWeight: FontWeight.w700)),
+              child: Text(
+                'Split Tunneling Presets',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
             ),
             ListTile(
               leading: const Icon(Icons.tune),
-              title: const Text('Custom (current rules)'),
-              subtitle: const Text('�������� ��࠭�� ��訣� ���⮢ ���⪨'),
+              title: const Text('Свои настройки'),
+              subtitle: const Text('Текущие правила без пресета'),
               onTap: () => Navigator.of(ctx).pop(_noPresetValue),
             ),
             const Divider(height: 1),
             if (_splitPresets.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 14),
-                child: Text('���࠭����� ���⮢ ���� ���'),
+                child: Text('Сохранённых пресетов нет'),
               )
             else
               ..._splitPresets.map(
@@ -831,7 +897,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   leading: const Icon(Icons.bookmark_outline),
                   title: Text(preset.name),
                   subtitle: Text(
-                    '${_describeSplitMode(preset.mode)} · ������: ${preset.domains.length}, �ਫ������: ${preset.applications.length}',
+                    '${preset.domains.length} доменов, ${preset.applications.length} приложений',
                   ),
                   onTap: () => Navigator.of(ctx).pop(preset.name),
                 ),
@@ -881,10 +947,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final defaultName = _previewProfileName();
     final nameController = TextEditingController(text: defaultName);
     final uriController = TextEditingController(text: _controller.text.trim());
-    final shouldSave = await showDialog<bool>(
+    final shouldSave =
+        await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Новый профиль VLESS'),
+            title: const Text('Добавить профиль'),
             content: SingleChildScrollView(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 480),
@@ -894,7 +961,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   children: [
                     TextField(
                       controller: nameController,
-                      decoration: const InputDecoration(labelText: 'Название профиля'),
+                      decoration: const InputDecoration(
+                        labelText: 'Название профиля',
+                      ),
                       textInputAction: TextInputAction.next,
                     ),
                     const SizedBox(height: 12),
@@ -911,7 +980,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Отмена')),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Отмена'),
+              ),
               FilledButton(
                 onPressed: () => Navigator.of(ctx).pop(true),
                 child: const Text('Сохранить'),
@@ -931,7 +1003,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   Future<void> _showEditProfileDialog(VpnProfile profile) async {
     final nameController = TextEditingController(text: profile.name);
     final uriController = TextEditingController(text: profile.uri);
-    final shouldSave = await showDialog<bool>(
+    final shouldSave =
+        await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
             title: const Text('Редактировать профиль'),
@@ -944,7 +1017,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   children: [
                     TextField(
                       controller: nameController,
-                      decoration: const InputDecoration(labelText: 'Название профиля'),
+                      decoration: const InputDecoration(
+                        labelText: 'Название профиля',
+                      ),
                       textInputAction: TextInputAction.next,
                     ),
                     const SizedBox(height: 12),
@@ -961,8 +1036,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Отмена')),
-              FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Сохранить')),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Сохранить'),
+              ),
             ],
           ),
         ) ??
@@ -983,7 +1064,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final previousPing = _profilePings.remove(previousName);
 
     setState(() {
-      _profiles = _profiles.map((p) => p.name == profile.name ? updated : p).toList();
+      _profiles = _profiles
+          .map((p) => p.name == profile.name ? updated : p)
+          .toList();
       if (_selectedProfile?.name == profile.name) {
         _selectedProfile = updated;
         _controller.text = newUri;
@@ -1039,14 +1122,18 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     if (trimmed.isNotEmpty) {
       return _ensureUniqueProfileName(trimmed);
     }
-    _profileNameCounter = math.max(_profileNameCounter, _findMaxProfileIndex(_profiles));
+    _profileNameCounter = math.max(
+      _profileNameCounter,
+      _findMaxProfileIndex(_profiles),
+    );
     _profileNameCounter += 1;
     final generated = 'Profile $_profileNameCounter';
     return _ensureUniqueProfileName(generated);
   }
 
   String _previewProfileName() {
-    final nextIndex = math.max(_profileNameCounter, _findMaxProfileIndex(_profiles)) + 1;
+    final nextIndex =
+        math.max(_profileNameCounter, _findMaxProfileIndex(_profiles)) + 1;
     return _ensureUniqueProfileName('Profile $nextIndex');
   }
 
@@ -1083,13 +1170,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }
 
     setState(() {
-      _status = 'Подготовка подключения';
+      _status = 'Подключение...';
       _logLines.clear();
     });
 
     final result = await _singBoxController.connect(
       rawUri: _controller.text,
       splitConfig: _configForConnection,
+      smartRouteEngine: _smartRouteEngine,
       onStatus: (value) {
         if (!mounted) return;
         setState(() => _status = value);
@@ -1139,14 +1227,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   Future<void> _copyStatusToClipboard() async {
     await Clipboard.setData(ClipboardData(text: _status));
     if (!mounted) return;
-    _showFastSnack('Состояние скопировано');
+    _showFastSnack('Статус скопирован');
   }
 
   void _showConfigDialog(BuildContext context) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Generated sing-box Config'),
+        title: const Text('Конфигурация sing-box'),
         content: SingleChildScrollView(
           child: SelectableText(
             _generatedConfig ?? '',
@@ -1156,7 +1244,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Close'),
+            child: const Text('Закрыть'),
           ),
         ],
       ),
@@ -1177,16 +1265,19 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   }
 
   @override
+  @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('VLESS VPN Клиент (Прототип)'),
-          bottom: const TabBar(
-            tabs: [
+          title: const Text('VLESS VPN Client'),
+          bottom: TabBar(
+            isScrollable: true,
+            tabs: const [
               Tab(text: 'Подключение'),
-              Tab(text: 'Сплит-туннелирование'),
+              Tab(text: 'Разделение'),
+              Tab(text: 'Проверка связи'),
             ],
           ),
         ),
@@ -1194,6 +1285,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           children: [
             _buildConnectionTab(),
             _buildSplitTunnelTab(),
+            _buildConnectivityTestTab(),
           ],
         ),
       ),
@@ -1243,7 +1335,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                     child: Padding(
                       padding: const EdgeInsets.all(12),
                       child: Text(
-                        'Split tunneling is disabled on the main screen. Enable the toggle to apply these rules.',
+                        'Раздельное туннелирование выключено на главном экране. Включите переключатель, чтобы применить эти правила.',
                         style: theme.textTheme.bodyMedium,
                       ),
                     ),
@@ -1252,7 +1344,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 _buildPresetPicker(context),
                 const SizedBox(height: 16),
                 Card(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.25),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest.withOpacity(0.25),
                   elevation: 0,
                   child: Padding(
                     padding: const EdgeInsets.all(20),
@@ -1261,24 +1355,43 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                       children: [
                         Row(
                           children: [
-                            Icon(Icons.layers_outlined, color: Theme.of(context).colorScheme.primary),
+                            Icon(
+                              Icons.layers_outlined,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
                             const SizedBox(width: 12),
-                            const Text('Сплит-туннелирование', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                            const Text(
+                              'Режим туннелирования',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 10),
                         Text(
-                          'Выберите режим, по которому будет распределяться трафик.',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).hintColor),
+                          'Выберите, как обрабатывать указанные домены и приложения',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: Theme.of(context).hintColor),
                         ),
                         const SizedBox(height: 14),
                         SegmentedButton<String>(
                           segments: const [
-                            ButtonSegment(value: 'whitelist', label: Text('Белый список')),
-                            ButtonSegment(value: 'blacklist', label: Text('Черный список')),
+                            ButtonSegment(
+                              value: 'whitelist',
+                              label: Text('Белый список'),
+                            ),
+                            ButtonSegment(
+                              value: 'blacklist',
+                              label: Text('Чёрный список'),
+                            ),
                           ],
                           style: SegmentedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 14,
+                              horizontal: 18,
+                            ),
                           ),
                           selected: {_splitMode},
                           onSelectionChanged: (selection) {
@@ -1292,16 +1405,16 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 const SizedBox(height: 16),
                 _buildEntrySection(
                   context: context,
-                  title: 'Домены и IP',
+                  title: 'Домены',
                   description: isWide
-                      ? 'Примеры: vk.com, youtube.com, 8.8.8.8, 1.1.1.0/24'
-                      : 'vk.com · 8.8.8.8 · 1.1.1.0/24',
+                      ? 'Укажите домены, которые будут обрабатываться согласно выбранному режиму'
+                      : 'Домены для фильтрации',
                   icon: Icons.language_outlined,
                   items: _activeSplitConfig.domains,
-                  emptyPlaceholder: 'Добавьте домены, IP или подсети, чтобы направить их в нужном режиме.',
+                  emptyPlaceholder: 'Доменов нет',
                   onAdd: () => _promptAddEntry(
-                    title: 'Добавить домен или IP',
-                    hint: 'vk.com или 8.8.8.8/32',
+                    title: 'Добавить домен',
+                    hint: 'Например: example.com',
                     onSubmit: _addDomainEntry,
                   ),
                   onRemove: _removeDomainEntry,
@@ -1311,21 +1424,27 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   context: context,
                   title: 'Приложения',
                   description: Platform.isAndroid
-                      ? 'Выберите приложение или введите package name вручную.'
-                      : 'Укажите путь к .exe, чтобы исключить или направить его через VPN.',
+                      ? 'Укажите Android-приложения по ID пакета'
+                      : 'Укажите пути к EXE-файлам приложений',
                   icon: Icons.apps_outlined,
                   items: _activeSplitConfig.applications,
                   emptyPlaceholder: Platform.isAndroid
-                      ? 'Пример: package:com.telegram.messenger'
-                      : 'Пример: C:/Program Files/Telegram/Telegram.exe',
+                      ? 'Приложений нет'
+                      : 'Приложений нет',
                   onAdd: () => _promptAddEntry(
                     title: 'Добавить приложение',
-                    hint: Platform.isAndroid ? 'com.example.app' : 'C:/Program Files/App/app.exe',
+                    hint: Platform.isAndroid
+                        ? 'com.example.app'
+                        : 'C:/Program Files/App/app.exe',
                     onSubmit: _addApplication,
                   ),
                   onRemove: _removeApplication,
-                  extraContent: Platform.isAndroid ? _buildAndroidAppActions(Theme.of(context)) : null,
-                  labelBuilder: Platform.isAndroid ? _describeApplicationEntry : null,
+                  extraContent: Platform.isAndroid
+                      ? _buildAndroidAppActions(Theme.of(context))
+                      : null,
+                  labelBuilder: Platform.isAndroid
+                      ? _describeApplicationEntry
+                      : null,
                 ),
                 const SizedBox(height: 12),
                 _buildPresetActionsBar(context),
@@ -1341,7 +1460,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
   Widget _buildPresetPicker(BuildContext context) {
     final theme = Theme.of(context);
     final presets = _splitPresets;
-    final selectedValue = _hasActivePreset ? _activePresetName! : _noPresetValue;
+    final selectedValue = _hasActivePreset
+        ? _activePresetName!
+        : _noPresetValue;
 
     Widget buildTile({
       required String title,
@@ -1351,7 +1472,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     }) {
       return Row(
         children: [
-          Icon(icon, size: 18, color: selected ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
+          Icon(
+            icon,
+            size: 18,
+            color: selected
+                ? theme.colorScheme.primary
+                : theme.colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -1361,18 +1488,23 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   title,
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
-                    color: selected ? theme.colorScheme.primary : theme.colorScheme.onSurface,
+                    color: selected
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurface,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.hintColor,
+                  ),
                 ),
               ],
             ),
           ),
-          if (selected) Icon(Icons.check, size: 18, color: theme.colorScheme.primary),
+          if (selected)
+            Icon(Icons.check, size: 18, color: theme.colorScheme.primary),
         ],
       );
     }
@@ -1390,8 +1522,8 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             PopupMenuItem(
               value: _noPresetValue,
               child: buildTile(
-                title: 'Не выбрано',
-                subtitle: 'Настроить и сохранить свой пресет',
+                title: 'Без пресета',
+                subtitle: 'Использовать текущие настройки',
                 selected: selectedValue == _noPresetValue,
                 icon: Icons.remove_circle_outline,
               ),
@@ -1406,7 +1538,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   child: buildTile(
                     title: preset.name,
                     subtitle:
-                        '${_describeSplitMode(preset.mode)} · домены: ${preset.domains.length}, приложения: ${preset.applications.length}',
+                        '${preset.domains.length} доменов, ${preset.applications.length} приложений',
                     selected: selectedValue == preset.name,
                     icon: Icons.bookmark_outline,
                   ),
@@ -1415,10 +1547,7 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             }
           } else {
             items.add(
-              const PopupMenuItem(
-                enabled: false,
-                child: Text('Сохраненных пресетов пока нет'),
-              ),
+              const PopupMenuItem(enabled: false, child: Text('Пресетов нет')),
             );
           }
           return items;
@@ -1428,7 +1557,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           decoration: BoxDecoration(
             color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.4),
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: theme.colorScheme.primary.withOpacity(0.2)),
+            border: Border.all(
+              color: theme.colorScheme.primary.withOpacity(0.2),
+            ),
             boxShadow: [
               BoxShadow(
                 color: theme.colorScheme.primary.withOpacity(0.12),
@@ -1440,27 +1571,43 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Активный пресет', style: theme.textTheme.labelSmall?.copyWith(color: theme.hintColor)),
+              Text(
+                'Активный пресет',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.hintColor,
+                ),
+              ),
               const SizedBox(height: 6),
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.bookmarks_outlined, color: theme.colorScheme.primary),
+                  Icon(
+                    Icons.bookmarks_outlined,
+                    color: theme.colorScheme.primary,
+                  ),
                   const SizedBox(width: 8),
                   Text(
                     _activePresetLabel,
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                   const SizedBox(width: 4),
-                  Icon(Icons.keyboard_arrow_down, color: theme.colorScheme.onSurfaceVariant),
+                  Icon(
+                    Icons.keyboard_arrow_down,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                 ],
               ),
               if (_presetDirty)
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Text(
-                    'Есть несохраненные изменения',
-                    style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                    'Есть несохранённые изменения',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.primary,
+                    ),
                   ),
                 ),
             ],
@@ -1488,14 +1635,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
         FilledButton.icon(
           onPressed: _presetDirty ? _overwriteActivePreset : null,
           icon: const Icon(Icons.save_outlined),
-          label: const Text('Перезаписать пресет'),
+          label: const Text('Обновить пресет'),
         ),
       );
       buttons.add(
         OutlinedButton.icon(
           onPressed: () => _confirmDeletePreset(activePreset!),
           icon: const Icon(Icons.delete_outline),
-          label: const Text('Удалить пресет'),
+          label: const Text('Удалить'),
         ),
       );
     } else {
@@ -1522,8 +1669,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
-                'Настройки отличаются от сохраненного пресета',
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                'Пресет был изменён. Сохраните изменения.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.primary,
+                ),
               ),
             ),
         ],
@@ -1535,13 +1684,15 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     final scheme = Theme.of(context).colorScheme;
     final isRunning = _isRunning;
     final gradient = isRunning
-      ? [const Color(0xFFFF1B2D), const Color(0xFF51030F)]
-      : [const Color(0xFF1A1B22), const Color(0xFF08090F)];
+        ? [const Color(0xFFFF1B2D), const Color(0xFF51030F)]
+        : [const Color(0xFF1A1B22), const Color(0xFF08090F)];
     final icon = isRunning ? Icons.shield : Icons.shield_outlined;
-    final hostLabel = _parsed != null ? '${_parsed!.host}:${_parsed!.port}' : 'Хост не выбран';
+    final hostLabel = _parsed != null
+        ? '${_parsed!.host}:${_parsed!.port}'
+        : 'Не подключено';
     final configLabel = Platform.isWindows
-      ? (_configFile != null ? _configFile!.path : 'Конфиг ещё не сгенерирован')
-      : (_generatedConfig != null ? 'Передан в сервис' : 'Конфиг ещё не сгенерирован');
+        ? (_configFile != null ? _configFile!.path : 'Конфиг не создан')
+        : (_generatedConfig != null ? 'Конфиг готов' : 'Конфиг не создан');
     final screenWidth = MediaQuery.of(context).size.width;
     final compactWidth = (screenWidth - 60).clamp(200.0, 320.0);
     final pillMaxWidth = isWide ? 240.0 : compactWidth;
@@ -1556,14 +1707,16 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           children: [
             OutlinedButton.icon(
               onPressed: canRefreshMetrics ? () => _refreshMetrics() : null,
-              icon: Icon(_pingInProgress ? Icons.timelapse : Icons.refresh_outlined),
-              label: Text(_pingInProgress ? 'Измерение...' : 'Обновить пинг'),
+              icon: Icon(
+                _pingInProgress ? Icons.timelapse : Icons.refresh_outlined,
+              ),
+              label: Text(_pingInProgress ? 'Измерение...' : 'Обновить'),
               style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
             ),
             OutlinedButton.icon(
               onPressed: _copyStatusToClipboard,
               icon: const Icon(Icons.copy_all_outlined),
-              label: const Text('Скопировать состояние'),
+              label: const Text('Копировать'),
               style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
             ),
             if (_generatedConfig != null)
@@ -1581,7 +1734,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           children: [
             SelectableText(
               _status,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+              style: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
             ),
             const SizedBox(height: 6),
             Text(
@@ -1591,16 +1748,19 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           ],
         );
 
-        final header = Flex(
-          direction: compact ? Axis.vertical : Axis.horizontal,
+        final header = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, size: 46, color: Colors.white),
-            SizedBox(width: compact ? 0 : 16, height: compact ? 16 : 0),
-            compact
-                ? statusTexts
-                : Expanded(child: statusTexts),
-            if (!compact) ...[const SizedBox(width: 16), actions],
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(icon, size: 46, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(child: statusTexts),
+              ],
+            ),
+            const SizedBox(height: 12),
+            actions,
           ],
         );
 
@@ -1609,7 +1769,11 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           padding: const EdgeInsets.all(28),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
-            gradient: LinearGradient(colors: gradient, begin: Alignment.topLeft, end: Alignment.bottomRight),
+            gradient: LinearGradient(
+              colors: gradient,
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
             boxShadow: [
               BoxShadow(
                 color: scheme.primary.withOpacity(isRunning ? 0.25 : 0.1),
@@ -1627,33 +1791,78 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 child: SizedBox(
                   width: isWide ? 260 : double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: _isRunning ? _stop : (_profiles.isNotEmpty ? _start : null),
+                    onPressed: _isRunning
+                        ? _stop
+                        : (_profiles.isNotEmpty ? _start : null),
                     style: ElevatedButton.styleFrom(
                       minimumSize: const Size.fromHeight(60),
-                      backgroundColor: _isRunning ? Colors.white : scheme.primary,
-                      foregroundColor: _isRunning ? scheme.primary : Colors.white,
-                      textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                      backgroundColor: _isRunning
+                          ? Colors.white
+                          : scheme.primary,
+                      foregroundColor: _isRunning
+                          ? scheme.primary
+                          : Colors.white,
+                      textStyle: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
                     ),
-                    icon: Icon(_isRunning ? Icons.stop_circle_outlined : Icons.power_settings_new),
+                    icon: Icon(
+                      _isRunning
+                          ? Icons.stop_circle_outlined
+                          : Icons.power_settings_new,
+                    ),
                     label: Text(_isRunning ? 'Отключить' : 'Подключить'),
                   ),
                 ),
               ),
-              if (compact) ...[
-                const SizedBox(height: 8),
-                actions,
-              ],
+              if (compact) ...[const SizedBox(height: 8), actions],
               const SizedBox(height: 20),
               Wrap(
                 spacing: 16,
                 runSpacing: 8,
                 children: [
-                  _buildInfoPill(context, Icons.account_circle, 'Профиль', _selectedProfileLabel, maxWidth: pillMaxWidth),
-                  _buildInfoPill(context, Icons.speed_outlined, 'Пинг', _pingLabel, maxWidth: pillMaxWidth),
-                  if (_developerMode) _buildInfoPill(context, Icons.cloud_outlined, 'Интерфейс', _interfaceLabel, maxWidth: pillMaxWidth),
+                  _buildInfoPill(
+                    context,
+                    Icons.account_circle,
+                    'Profile',
+                    _selectedProfileLabel,
+                    maxWidth: pillMaxWidth,
+                  ),
+                  _buildInfoPill(
+                    context,
+                    Icons.speed_outlined,
+                    'Ping',
+                    _pingLabel,
+                    maxWidth: pillMaxWidth,
+                  ),
+                  if (_smartRouting)
+                    _buildInfoPill(
+                      context,
+                      Icons.route_outlined,
+                      'Smart Routing',
+                      'Smart Routing: ON',
+                      maxWidth: pillMaxWidth,
+                    ),
+                  if (_developerMode)
+                    _buildInfoPill(
+                      context,
+                      Icons.cloud_outlined,
+                      'Interface',
+                      _interfaceLabel,
+                      maxWidth: pillMaxWidth,
+                    ),
                   if (_developerMode && _configFile != null)
-                    _buildInfoPill(context, Icons.folder_outlined, 'Путь конфига', configLabel, maxWidth: pillMaxWidth),
+                    _buildInfoPill(
+                      context,
+                      Icons.folder_outlined,
+                      'Config path',
+                      configLabel,
+                      maxWidth: pillMaxWidth,
+                    ),
                 ],
               ),
               const SizedBox(height: 14),
@@ -1682,7 +1891,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 Icon(Icons.person_outline, color: theme.colorScheme.primary),
                 const SizedBox(width: 12),
                 const Expanded(
-                  child: Text('Профили VLESS', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                  child: Text(
+                    'Профили подключения',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                  ),
                 ),
                 IconButton(
                   tooltip: 'Добавить профиль',
@@ -1694,23 +1906,26 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             const SizedBox(height: 16),
             if (!hasProfiles) ...[
               Text(
-                'Подключение выполняется через выбранный профиль. Создайте новый VLESS профиль для старта.',
+                'Нет сохранённых профилей. Добавьте первый профиль.',
                 style: theme.textTheme.bodyMedium,
               ),
               const SizedBox(height: 12),
               FilledButton(
                 onPressed: _showProfileDialog,
-                child: const Text('Создать профиль'),
+                child: const Text('Добавить профиль'),
               ),
             ] else ...[
               DropdownButtonFormField<String>(
                 initialValue: _selectedProfile?.name,
-                decoration: const InputDecoration(labelText: 'Активный профиль'),
+                decoration: const InputDecoration(labelText: 'Текущий профиль'),
                 items: _profiles
                     .map(
                       (profile) => DropdownMenuItem(
                         value: profile.name,
-                        child: Text(profile.name, overflow: TextOverflow.ellipsis),
+                        child: Text(
+                          profile.name,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     )
                     .toList(),
@@ -1727,7 +1942,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                       final profile = _profiles[index];
                       final isSelected = _selectedProfile?.name == profile.name;
                       final ping = _profilePings[profile.name];
-                      final pingLabel = ping != null ? 'Пинг: $ping мс' : 'Нет пинга';
+                      final pingLabel = ping != null
+                          ? '$ping мс'
+                          : 'нет данных';
                       return Container(
                         margin: const EdgeInsets.only(bottom: 8),
                         padding: const EdgeInsets.all(8),
@@ -1735,11 +1952,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                           borderRadius: BorderRadius.circular(12),
                           color: isSelected
                               ? theme.colorScheme.primary.withOpacity(0.12)
-                              : theme.colorScheme.surfaceContainerHighest.withOpacity(0.25),
+                              : theme.colorScheme.surfaceContainerHighest
+                                    .withOpacity(0.25),
                           border: Border.all(
                             color: isSelected
                                 ? theme.colorScheme.primary
-                                : theme.colorScheme.outlineVariant.withOpacity(0.4),
+                                : theme.colorScheme.outlineVariant.withOpacity(
+                                    0.4,
+                                  ),
                           ),
                         ),
                         child: Row(
@@ -1753,31 +1973,54 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                                       Expanded(
                                         child: Text(
                                           profile.name,
-                                          style: const TextStyle(fontWeight: FontWeight.w700),
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                          ),
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
-                                      Text(pingLabel, style: theme.textTheme.bodySmall),
+                                      Text(
+                                        pingLabel,
+                                        style: theme.textTheme.bodySmall,
+                                      ),
                                     ],
                                   ),
                                   const SizedBox(height: 4),
                                   Row(
                                     children: [
                                       FilledButton.tonal(
-                                        onPressed: _isRunning ? null : () => _selectProfile(profile.name),
+                                        onPressed: _isRunning
+                                            ? null
+                                            : () =>
+                                                  _selectProfile(profile.name),
                                         style: FilledButton.styleFrom(
-                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                                          backgroundColor: isSelected ? theme.colorScheme.primary : null,
-                                          foregroundColor: isSelected ? Colors.white : null,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 14,
+                                            vertical: 8,
+                                          ),
+                                          backgroundColor: isSelected
+                                              ? theme.colorScheme.primary
+                                              : null,
+                                          foregroundColor: isSelected
+                                              ? Colors.white
+                                              : null,
                                         ),
                                         child: const Text('Выбрать'),
                                       ),
                                       if (isSelected)
                                         Padding(
-                                          padding: const EdgeInsets.only(left: 8),
+                                          padding: const EdgeInsets.only(
+                                            left: 8,
+                                          ),
                                           child: Text(
-                                            _isRunning ? 'Подключено' : 'Выбрано',
-                                            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                                            _isRunning
+                                                ? '✓ Активен'
+                                                : '✓ Выбран',
+                                            style: theme.textTheme.bodySmall
+                                                ?.copyWith(
+                                                  color:
+                                                      theme.colorScheme.primary,
+                                                ),
                                           ),
                                         ),
                                     ],
@@ -1786,14 +2029,15 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                               ),
                             ),
                             IconButton(
-                              tooltip: 'Редактировать профиль',
+                              tooltip: 'Редактировать',
                               icon: const Icon(Icons.edit_outlined, size: 18),
                               onPressed: () => _showEditProfileDialog(profile),
                             ),
                             IconButton(
-                              tooltip: 'Удалить профиль',
+                              tooltip: 'Удалить',
                               icon: const Icon(Icons.delete_outline, size: 18),
-                              onPressed: () => _removeProfileByName(profile.name),
+                              onPressed: () =>
+                                  _removeProfileByName(profile.name),
                             ),
                           ],
                         ),
@@ -1808,7 +2052,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 runSpacing: 12,
                 children: [
                   TextButton.icon(
-                    onPressed: _generatedConfig != null ? () => _showConfigDialog(context) : null,
+                    onPressed: _generatedConfig != null
+                        ? () => _showConfigDialog(context)
+                        : null,
                     icon: const Icon(Icons.receipt_long),
                     label: const Text('Показать конфиг'),
                   ),
@@ -1832,7 +2078,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               children: [
                 Icon(Icons.call_split, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                const Text('Разделенный трафик', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const Text(
+                  'Раздельное туннелирование',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -1842,9 +2091,12 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: const [
-                      Text('Split tunneling', style: TextStyle(fontWeight: FontWeight.w600)),
+                      Text(
+                        'Раздельное туннелирование',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                       SizedBox(height: 4),
-                      Text('Включите, чтобы применять правила разделения трафика.'),
+                      Text('Разделяйте трафик по доменам и приложениям'),
                     ],
                   ),
                 ),
@@ -1857,11 +2109,18 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             const SizedBox(height: 12),
             if (_splitEnabled) ...[
               DropdownButtonFormField<String>(
-                value: _hasActivePreset ? _activePresetName : _noPresetValue,
+                initialValue: _hasActivePreset
+                    ? _activePresetName
+                    : _noPresetValue,
                 decoration: const InputDecoration(labelText: 'Split preset'),
                 items: [
-                  DropdownMenuItem(value: _noPresetValue, child: Text(_presetDirty ? 'Custom *' : 'Custom')),
-                  ..._splitPresets.map((p) => DropdownMenuItem(value: p.name, child: Text(p.name))),
+                  DropdownMenuItem(
+                    value: _noPresetValue,
+                    child: Text(_presetDirty ? 'Custom *' : 'Custom'),
+                  ),
+                  ..._splitPresets.map(
+                    (p) => DropdownMenuItem(value: p.name, child: Text(p.name)),
+                  ),
                 ],
                 onChanged: (value) {
                   if (value == null) return;
@@ -1876,9 +2135,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: const [
-                      Text('Smart Routing', style: TextStyle(fontWeight: FontWeight.w600)),
+                      Text(
+                        'Smart Routing (Level 3)',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                       SizedBox(height: 4),
-                      Text('Automatically bypass Russian websites to increase speed and stability.'),
+                      Text(
+                        'Automatically bypass Russian sites and networks while keeping foreign services via VPN.',
+                      ),
                     ],
                   ),
                 ),
@@ -1909,20 +2173,41 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
           spacing: 16,
           runSpacing: 12,
           children: [
-            _buildInfoPill(context, Icons.history, 'Log lines', _logLines.length.toString()),
+            _buildInfoPill(
+              context,
+              Icons.history,
+              'Log lines',
+              _logLines.length.toString(),
+            ),
             if (_parsed != null)
-              _buildInfoPill(context, Icons.language, 'Server', '${_parsed!.host}:${_parsed!.port}'),
+              _buildInfoPill(
+                context,
+                Icons.language,
+                'Server',
+                '${_parsed!.host}:${_parsed!.port}',
+              ),
             if (_developerMode && _configFile != null)
-              _buildInfoPill(context, Icons.folder_outlined, 'Config Path', _configFile!.path, maxWidth: 240),
+              _buildInfoPill(
+                context,
+                Icons.folder_outlined,
+                'Config Path',
+                _configFile!.path,
+                maxWidth: 240,
+              ),
           ],
         ),
       ],
     );
   }
+
   Widget _buildLogPanel(BuildContext context) {
-    final logText = _logLines.isEmpty ? 'Логи появляются после запуска подключения.' : _logLines.join('\n');
+    final logText = _logLines.isEmpty
+        ? 'Лог пуст. Подключитесь к VPN для просмотра сообщений.'
+        : _logLines.join('\n');
     return Card(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.25),
+      color: Theme.of(
+        context,
+      ).colorScheme.surfaceContainerHighest.withOpacity(0.25),
       elevation: 0,
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -1934,10 +2219,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                 const Icon(Icons.terminal_rounded),
                 const SizedBox(width: 12),
                 const Expanded(
-                  child: Text('Журнал', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  child: Text(
+                    'Лог подключения',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
                 ),
                 IconButton(
-                  tooltip: 'Очистить',
+                  tooltip: 'Очистить лог',
                   onPressed: _logLines.isEmpty
                       ? null
                       : () {
@@ -1952,7 +2240,9 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
               height: 280,
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.35),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest.withOpacity(0.35),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Padding(
@@ -1964,7 +2254,10 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                       controller: _logScrollController,
                       child: SelectableText(
                         logText,
-                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
                   ),
@@ -2011,9 +2304,20 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 16,
+                        ),
+                      ),
                       const SizedBox(height: 4),
-                      Text(description, style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor)),
+                      Text(
+                        description,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.hintColor,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -2034,9 +2338,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             if (items.isEmpty)
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 20,
+                  horizontal: 12,
+                ),
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.25),
+                  color: theme.colorScheme.surfaceContainerHighest.withOpacity(
+                    0.25,
+                  ),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Text(emptyPlaceholder, style: theme.textTheme.bodySmall),
@@ -2050,15 +2359,13 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
                   return InputChip(
                     label: Text(label),
                     onDeleted: () => onRemove(value),
-                    backgroundColor: theme.colorScheme.surfaceContainerHighest.withOpacity(0.35),
+                    backgroundColor: theme.colorScheme.surfaceContainerHighest
+                        .withOpacity(0.35),
                     labelStyle: theme.textTheme.bodyMedium,
                   );
                 }).toList(),
               ),
-            if (footer != null) ...[
-              const SizedBox(height: 12),
-              footer,
-            ],
+            if (footer != null) ...[const SizedBox(height: 12), footer],
           ],
         ),
       ),
@@ -2133,7 +2440,14 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     return sanitized;
   }
 
-  Widget _buildInfoPill(BuildContext context, IconData icon, String title, String value, {double? maxWidth, VoidCallback? onTap}) {
+  Widget _buildInfoPill(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String value, {
+    double? maxWidth,
+    VoidCallback? onTap,
+  }) {
     final theme = Theme.of(context);
     final radius = BorderRadius.circular(16);
     final content = Container(
@@ -2151,17 +2465,24 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                Text(
+                  title,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
                 const SizedBox(height: 2),
                 Text(
                   value,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
             ),
-          )
+          ),
         ],
       ),
     );
@@ -2180,15 +2501,150 @@ class _VlessHomePageState extends State<VlessHomePage> with TrayListener, Window
     );
   }
 
+  Future<void> _runConnectivityTests() async {
+    if (_isConnectivityTesting) return;
+    _connectivityTester.clearCache();
+    _connectivityResults.clear();
+    _connectivityLastRun = null;
+    setState(() {
+      _isConnectivityTesting = true;
+      _cancelConnectivity = false;
+      _connectivityCompleted = 0;
+    });
+    final results = await _connectivityTester.run(
+      _connectivityTargets,
+      onProgress: (completed, total) {
+        if (!mounted) return;
+        setState(() => _connectivityCompleted = completed);
+      },
+      isCancelled: () => _cancelConnectivity,
+    );
+    if (!mounted) return;
+    setState(() {
+      _connectivityResults
+        ..clear()
+        ..addAll(results);
+      _isConnectivityTesting = false;
+      _cancelConnectivity = false;
+      _connectivityLastRun = DateTime.now();
+    });
+  }
+
+  void _cancelConnectivityTests() {
+    if (!_isConnectivityTesting) return;
+    setState(() => _cancelConnectivity = true);
+  }
+
+  Future<void> _exportConnectivityResults() async {
+    final payload = <String, dynamic>{
+      for (final entry in _connectivityResults.entries)
+        entry.key: entry.value.toJson(),
+    };
+    final jsonText = const JsonEncoder.withIndent('  ').convert(payload);
+    await Clipboard.setData(ClipboardData(text: jsonText));
+    if (!mounted) return;
+    _showFastSnack('Results copied to clipboard');
+  }
+
+  Widget _buildConnectivityTestTab() {
+    final theme = Theme.of(context);
+    final total = _connectivityTargets.length;
+    final completed = _connectivityCompleted;
+    final running = _isConnectivityTesting;
+    final results = _connectivityResults.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+
+    Widget buildItem(String domain, ConnectivityTestResult result) {
+      final color = switch (result.status) {
+        'ok' => Colors.green,
+        'timeout' => Colors.orange,
+        _ => Colors.red,
+      };
+      final timeLabel = result.durationMs != null
+          ? '${result.durationMs} мс'
+          : '--';
+      return Card(
+        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.2),
+        elevation: 0,
+        child: ListTile(
+          leading: Icon(Icons.circle, size: 12, color: color),
+          title: Text(domain),
+          subtitle: Text('${result.status} • $timeLabel'),
+          trailing: result.httpStatus != null ? Text('HTTP ') : null,
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                'Massive Connectivity Test',
+                style: theme.textTheme.titleLarge,
+              ),
+              FilledButton.icon(
+                onPressed: running ? null : _runConnectivityTests,
+                icon: Icon(running ? Icons.timer : Icons.play_arrow),
+                label: Text(running ? 'Running...' : 'Start'),
+              ),
+              OutlinedButton.icon(
+                onPressed: running
+                    ? _cancelConnectivityTests
+                    : _exportConnectivityResults,
+                icon: Icon(
+                  running ? Icons.stop_circle_outlined : Icons.download,
+                ),
+                label: Text(running ? 'Cancel' : 'Export'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text('Progress:  /  ( cached)', style: theme.textTheme.bodySmall),
+          if (_connectivityLastRun != null)
+            Text(
+              'Last run: ',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.hintColor,
+              ),
+            ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: results.isEmpty
+                ? Center(
+                    child: Text(
+                      'No results yet. Start testing to populate the list.',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: results.length,
+                    itemBuilder: (context, index) {
+                      final entry = results[index];
+                      return buildItem(entry.key, entry.value);
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _describeSplitMode([String? value]) {
     final mode = value ?? _splitMode;
     switch (mode) {
       case 'whitelist':
-        return 'Белый список';
+        return 'Белый список: через VPN только указанные';
       case 'blacklist':
-        return 'Черный список';
+        return 'Чёрный список: без VPN только указанные';
       default:
-        return 'Весь трафик';
+        return 'Неизвестный режим';
     }
   }
 }
@@ -2316,7 +2772,8 @@ class _AndroidAppPickerSheetState extends State<_AndroidAppPickerSheet> {
         : widget.apps.where((app) {
             final name = app.appName.toLowerCase();
             final package = app.packageName.toLowerCase();
-            return name.contains(normalizedQuery) || package.contains(normalizedQuery);
+            return name.contains(normalizedQuery) ||
+                package.contains(normalizedQuery);
           }).toList();
 
     final height = MediaQuery.of(context).size.height * 0.7;
@@ -2325,15 +2782,13 @@ class _AndroidAppPickerSheetState extends State<_AndroidAppPickerSheet> {
         height: height,
         child: Column(
           children: [
-            const ListTile(
-              title: Text('Выберите приложение'),
-            ),
+            const ListTile(title: Text('Выберите приложение')),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
                 autofocus: true,
                 decoration: const InputDecoration(
-                  labelText: 'Поиск по названию или пакету',
+                  labelText: 'Поиск',
                   prefixIcon: Icon(Icons.search),
                 ),
                 onChanged: (value) => setState(() => _query = value),
@@ -2342,7 +2797,7 @@ class _AndroidAppPickerSheetState extends State<_AndroidAppPickerSheet> {
             const SizedBox(height: 8),
             Expanded(
               child: filtered.isEmpty
-                  ? const Center(child: Text('Совпадений не найдено'))
+                  ? const Center(child: Text('Приложений не найдено'))
                   : ListView.builder(
                       itemCount: filtered.length,
                       itemBuilder: (context, index) {
@@ -2351,7 +2806,8 @@ class _AndroidAppPickerSheetState extends State<_AndroidAppPickerSheet> {
                           leading: const Icon(Icons.apps_outlined),
                           title: Text(app.appName),
                           subtitle: Text(app.packageName),
-                          onTap: () => Navigator.of(context).pop(app.packageName),
+                          onTap: () =>
+                              Navigator.of(context).pop(app.packageName),
                         );
                       },
                     ),
@@ -2362,34 +2818,3 @@ class _AndroidAppPickerSheetState extends State<_AndroidAppPickerSheet> {
     );
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

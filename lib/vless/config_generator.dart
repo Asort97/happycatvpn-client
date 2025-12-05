@@ -99,16 +99,19 @@ String generateSingBoxConfig(
     'dns': {
       'servers': [
         {
+          'type': 'udp',
           'tag': 'dns-remote',
-          'address': '1.1.1.1',
-          'strategy': 'ipv4_only',
+          'server': '8.8.8.8',
+          'server_port': 53,
         },
         {
+          'type': 'local',
           'tag': 'dns-local',
-          'address': 'local',
         },
       ],
       'final': 'dns-remote',
+      'strategy': 'prefer_ipv4',
+      'independent_cache': false,
     },
     'inbounds': [
       {
@@ -137,17 +140,10 @@ String generateSingBoxConfig(
         hasAndroidPackageRules: hasAndroidPackageRules,
       ),
       'rules': [
+        // Hijack DNS queries using rule action instead of legacy dns outbound
         {
-          'inbound': [inboundTag],
-          'port': 53,
-          'network': 'udp',
-          'outbound': 'dns-remote',
-        },
-        {
-          'inbound': [inboundTag],
-          'port': 53,
-          'network': 'tcp',
-          'outbound': 'dns-remote',
+          'protocol': 'dns',
+          'action': 'hijack-dns',
         },
 
         ...smartRules,

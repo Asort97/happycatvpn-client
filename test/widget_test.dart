@@ -5,6 +5,7 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:happycat_vpnclient/main.dart';
@@ -12,8 +13,13 @@ import 'package:happycat_vpnclient/main.dart';
 void main() {
   testWidgets('VPN home page renders', (WidgetTester tester) async {
     await tester.pumpWidget(const VpnApp());
+    await tester.pumpAndSettle();
 
-    expect(find.text('VLESS VPN Client (Prototype)'), findsOneWidget);
-    expect(find.text('Split Tunneling'), findsOneWidget);
+    expect(find.byType(TabBar), findsOneWidget);
+    expect(find.byType(Tab), findsNWidgets(3));
+
+    await tester.tap(find.byType(Tab).last);
+    await tester.pumpAndSettle();
+    expect(find.byType(TabBarView), findsOneWidget);
   });
 }
