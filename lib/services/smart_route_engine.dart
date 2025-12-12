@@ -1,3 +1,7 @@
+import 'dart:async';
+
+import 'cache_repository.dart';
+
 enum RouteDecision { bypassVpn, useVpn }
 
 /// Lightweight smart routing engine based on Russian TLDs and a curated list of services.
@@ -10,9 +14,11 @@ class SmartRouteEngine {
     Duration domainCacheTtl = const Duration(minutes: 30),
     int domainCacheSize = 512,
     DateTime Function()? clock,
+    CacheRepository? cacheRepository,
   }) : ruTlds = Set<String>.from(ruTlds ?? _defaultTlds),
        russianServices = Set<String>.from(russianServices ?? _defaultServices),
-       _clock = clock ?? DateTime.now {
+       _clock = clock ?? DateTime.now,
+       _cacheRepository = cacheRepository {
     _domainCache = _TtlLruCache<String, RouteDecision>(
       ttl: domainCacheTtl,
       capacity: domainCacheSize,
@@ -24,12 +30,18 @@ class SmartRouteEngine {
   final Set<String> russianServices;
   late final _TtlLruCache<String, RouteDecision> _domainCache;
   final DateTime Function() _clock;
+  final CacheRepository? _cacheRepository;
+
+  bool _restoredFromDisk = false;
+  Timer? _persistDebounce;
 
   /// Main decision function following strict priority:
   /// 1) RU TLD (.ru/.su/.xn--p1ai) => bypass
   /// 2) Known Russian services list => bypass
   /// 3) Otherwise => use VPN
   Future<RouteDecision> decideForDomain(String domain) async {
+    await _restoreCacheIfNeeded();
+
     final normalized = _normalizeDomain(domain);
     if (normalized.isEmpty) return RouteDecision.useVpn;
 
@@ -38,7 +50,57 @@ class SmartRouteEngine {
 
     final decision = _decide(normalized);
     _domainCache.set(normalized, decision);
+    _schedulePersist();
     return decision;
+  }
+
+  Future<void> _restoreCacheIfNeeded() async {
+    if (_cacheRepository == null || _restoredFromDisk) return;
+    _restoredFromDisk = true;
+    try {
+      final stored = await _cacheRepository.loadRouteDecisions();
+      final now = _clock();
+      stored.forEach((domain, record) {
+        if (now.isBefore(record.expiresAt)) {
+          final decision = record.decision == 'bypass'
+              ? RouteDecision.bypassVpn
+              : RouteDecision.useVpn;
+          _domainCache.set(domain, decision, customExpiry: record.expiresAt);
+        }
+      });
+    } catch (_) {
+      // Игнорируем ошибки чтения кеша.
+    }
+  }
+
+  void _schedulePersist() {
+    if (_cacheRepository == null) return;
+    _persistDebounce?.cancel();
+    _persistDebounce = Timer(const Duration(seconds: 1), () async {
+      final now = _clock();
+      final data = <String, RouteCacheRecord>{};
+      for (final entry in _domainCache.dump()) {
+        final expiresAt = entry.value.expiresAt;
+        if (now.isBefore(expiresAt)) {
+          data[entry.key] = RouteCacheRecord(
+            decision: entry.value.value == RouteDecision.bypassVpn
+                ? 'bypass'
+                : 'vpn',
+            expiresAt: expiresAt,
+          );
+        }
+      }
+      if (data.isEmpty) return;
+      try {
+        await _cacheRepository.saveRouteDecisions(data);
+      } catch (_) {
+        // Игнорируем ошибки записи.
+      }
+    });
+  }
+
+  void dispose() {
+    _persistDebounce?.cancel();
   }
 
   RouteDecision _decide(String normalizedDomain) {
@@ -119,14 +181,17 @@ class _TtlLruCache<K, V> {
     return entry.value;
   }
 
-  void set(K key, V value) {
+  void set(K key, V value, {DateTime? customExpiry}) {
     if (capacity <= 0) return;
     if (_store.length >= capacity && !_store.containsKey(key)) {
       final firstKey = _store.keys.first;
       _store.remove(firstKey);
     }
-    _store[key] = _CacheEntry(value, _clock().add(ttl));
+    final expiry = customExpiry ?? _clock().add(ttl);
+    _store[key] = _CacheEntry(value, expiry);
   }
+
+  Iterable<MapEntry<K, _CacheEntry<V>>> dump() => _store.entries.toList();
 
   void clear() => _store.clear();
 }

@@ -197,6 +197,7 @@ class SingBoxController {
       );
       _androidConnected = true;
       _notifyStatus('Libbox сервис запущен');
+      unawaited(_warmupConnection());
       return SingBoxStartResult.success();
     }
 
@@ -230,6 +231,7 @@ class SingBoxController {
       _process = process;
       _attachProcessHandlers(process, interfaceName);
       _notifyStatus('Подключено (TUN: $interfaceName)');
+      unawaited(_warmupConnection());
       return SingBoxStartResult.success();
     } catch (e) {
       return SingBoxStartResult.failure('Ошибка запуска: $e');
@@ -345,6 +347,71 @@ class SingBoxController {
       final trimmed = line.trim();
       if (trimmed.isEmpty) continue;
       _logSink?.call(trimmed);
+    }
+  }
+
+  Future<void> _warmupConnection() async {
+    // Расширенный прогрев с DNS-предзагрузкой популярных доменов.
+    const warmupDomains = [
+      // Основные CDN
+      'google.com',
+      'youtube.com',
+      'gstatic.com',
+      'ytimg.com',
+      'cloudflare.com',
+      'fastly.net',
+      // Популярные сервисы
+      'github.com',
+      'discord.com',
+      'telegram.org',
+      'facebook.com',
+      'instagram.com',
+      'twitter.com',
+      'reddit.com',
+      'netflix.com',
+      'spotify.com',
+      'amazon.com',
+      'apple.com',
+      'microsoft.com',
+    ];
+
+    // DNS-предзагрузка без HTTP-запросов (быстрее)
+    for (final domain in warmupDomains) {
+      unawaited(_preloadDns(domain));
+    }
+
+    // Минимальный HTTP-прогрев, чтобы гарантированно создать реальный трафик через TUN.
+    // Это помогает диагностике (появятся outbound/handshake логи) и сразу отмечает клиента "online" на панели.
+    const warmupHttpDomains = ['cloudflare.com', 'www.microsoft.com'];
+    for (final domain in warmupHttpDomains) {
+      unawaited(_warmupDomain(domain));
+    }
+  }
+
+  Future<void> _preloadDns(String domain) async {
+    try {
+      await InternetAddress.lookup(domain).timeout(
+        const Duration(milliseconds: 800),
+      );
+    } catch (_) {
+      // Тихое игнорирование ошибок DNS-прогрева.
+    }
+  }
+
+  Future<void> _warmupDomain(String domain) async {
+    final client = HttpClient();
+    client.connectionTimeout = const Duration(milliseconds: 1200);
+    client.badCertificateCallback = (cert, host, port) => false;
+
+    try {
+      final request = await client
+          .openUrl('HEAD', Uri.https(domain, '/'))
+          .timeout(const Duration(milliseconds: 1200));
+      await request.close().timeout(const Duration(milliseconds: 1200));
+    } catch (_) {
+      // Игнорируем ошибки прогрева, чтобы не мешать основному подключению.
+    } finally {
+      client.close(force: true);
     }
   }
 

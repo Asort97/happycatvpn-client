@@ -9,18 +9,25 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'vless/vless_parser.dart';
 import 'models/split_tunnel_config.dart';
 import 'models/split_tunnel_preset.dart';
 import 'models/connectivity_test.dart';
+import 'models/vpn_subscription.dart';
 import 'services/connectivity_targets.dart';
 import 'services/connectivity_tester.dart';
 import 'services/smart_route_engine.dart';
 import 'services/singbox_controller.dart';
+import 'services/subscription_repository.dart';
+import 'services/subscription_manager.dart';
 import 'models/vpn_profile.dart';
+import 'widgets/profile_list_view.dart';
+import 'widgets/add_profile_dialog.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('ru_RU', null);
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
     const windowOptions = WindowOptions(
@@ -81,7 +88,7 @@ class _VlessHomePageState extends State<VlessHomePage>
     'whitelist': SplitTunnelConfig(mode: 'whitelist'),
     'blacklist': SplitTunnelConfig(mode: 'blacklist'),
   };
-  String _splitMode = 'whitelist';
+  String _splitMode = 'all';
   List<SplitTunnelPreset> _splitPresets = [];
   String? _activePresetName;
   bool _presetDirty = false;
@@ -106,7 +113,7 @@ class _VlessHomePageState extends State<VlessHomePage>
   static const String _smartRoutingKey = 'smart_routing_enabled';
   int? _pingMs;
   bool _pingInProgress = false;
-  bool _splitEnabled = true;
+  bool _splitEnabled = false;
   final Map<String, int> _profilePings = {};
   final List<String> _logLines = <String>[];
   int _profileNameCounter = 0;
@@ -469,12 +476,14 @@ class _VlessHomePageState extends State<VlessHomePage>
 
   String _normalizeSplitMode(String? raw) {
     switch (raw) {
+      case 'all':
+        return 'all';
       case 'whitelist':
         return 'whitelist';
       case 'blacklist':
         return 'blacklist';
       default:
-        return 'whitelist';
+        return 'all';
     }
   }
 
@@ -864,53 +873,6 @@ class _VlessHomePageState extends State<VlessHomePage>
     }
   }
 
-  Future<void> _showPresetPickerSheet() async {
-    final selection = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 10),
-              child: Text(
-                'Split Tunneling Presets',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.tune),
-              title: const Text('Свои настройки'),
-              subtitle: const Text('Текущие правила без пресета'),
-              onTap: () => Navigator.of(ctx).pop(_noPresetValue),
-            ),
-            const Divider(height: 1),
-            if (_splitPresets.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: Text('Сохранённых пресетов нет'),
-              )
-            else
-              ..._splitPresets.map(
-                (preset) => ListTile(
-                  leading: const Icon(Icons.bookmark_outline),
-                  title: Text(preset.name),
-                  subtitle: Text(
-                    '${preset.domains.length} доменов, ${preset.applications.length} приложений',
-                  ),
-                  onTap: () => Navigator.of(ctx).pop(preset.name),
-                ),
-              ),
-            const SizedBox(height: 10),
-          ],
-        ),
-      ),
-    );
-    if (selection == null) return;
-    _handlePresetSelection(selection);
-  }
-
   Future<void> _addProfile(String name, String uri) async {
     final trimmedUri = uri.trim();
     if (trimmedUri.isEmpty) return;
@@ -944,141 +906,65 @@ class _VlessHomePageState extends State<VlessHomePage>
   }
 
   Future<void> _showProfileDialog() async {
-    final defaultName = _previewProfileName();
-    final nameController = TextEditingController(text: defaultName);
-    final uriController = TextEditingController(text: _controller.text.trim());
-    final shouldSave =
-        await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Добавить профиль'),
-            content: SingleChildScrollView(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 480),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    TextField(
-                      controller: nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Название профиля',
-                      ),
-                      textInputAction: TextInputAction.next,
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: uriController,
-                      decoration: const InputDecoration(labelText: 'VLESS URI'),
-                      minLines: 3,
-                      maxLines: 8,
-                      keyboardType: TextInputType.multiline,
-                      autofillHints: const [AutofillHints.url],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Отмена'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Сохранить'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => const AddProfileDialog(),
+    );
 
-    final name = nameController.text;
-    final uri = uriController.text;
+    if (result == null) return;
 
-    if (!shouldSave || uri.trim().isEmpty) return;
-    await _addProfile(name, uri);
+    final input = result['input'] as String;
+    final name = result['name'] as String;
+    final isVless = result['isVless'] as bool;
+
+    if (isVless) {
+      // Это прямой VLESS ключ
+      final displayName = name.isEmpty ? _previewProfileName() : name;
+      await _addProfile(displayName, input);
+    } else {
+      // Это подписка - добавляем в репозиторий
+      await _addSubscription(input, name.isEmpty ? 'Новая подписка' : name);
+    }
   }
 
-  Future<void> _showEditProfileDialog(VpnProfile profile) async {
-    final nameController = TextEditingController(text: profile.name);
-    final uriController = TextEditingController(text: profile.uri);
-    final shouldSave =
-        await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Редактировать профиль'),
-            content: SingleChildScrollView(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 480),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    TextField(
-                      controller: nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Название профиля',
-                      ),
-                      textInputAction: TextInputAction.next,
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: uriController,
-                      decoration: const InputDecoration(labelText: 'VLESS URI'),
-                      minLines: 3,
-                      maxLines: 8,
-                      keyboardType: TextInputType.multiline,
-                      autofillHints: const [AutofillHints.url],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Отмена'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Сохранить'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
+  Future<void> _addSubscription(String url, String name) async {
+    try {
+      final manager = SubscriptionService();
 
-    final newNameRaw = nameController.text.trim();
-    final newUri = uriController.text.trim();
+      // Загружаем профили из подписки
+      final profiles = await manager.fetchSubscription(url);
+      if (profiles.isEmpty) {
+        throw 'В подписке не найдено профилей';
+      }
 
-    if (!shouldSave || newUri.isEmpty) return;
+      // Создаём подписку
+      final subscription = VpnSubscription(
+        name: name,
+        url: url,
+        profiles: profiles,
+      );
 
-    var finalName = newNameRaw.isEmpty ? profile.name : newNameRaw;
-    if (finalName != profile.name) {
-      finalName = _ensureUniqueProfileName(finalName, skipName: profile.name);
+      // Добавляем в репозиторий
+      final repository = SubscriptionRepository();
+      final added = await repository.addSubscription(subscription);
+
+      if (added) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Подписка добавлена')),
+        );
+        setState(() {
+          // Перезагружаем UI
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Подписка с этим URL уже существует')),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка: $e')),
+      );
     }
-
-    final updated = VpnProfile(name: finalName, uri: newUri);
-    final previousName = profile.name;
-    final previousPing = _profilePings.remove(previousName);
-
-    setState(() {
-      _profiles = _profiles
-          .map((p) => p.name == profile.name ? updated : p)
-          .toList();
-      if (_selectedProfile?.name == profile.name) {
-        _selectedProfile = updated;
-        _controller.text = newUri;
-      }
-      if (previousPing != null) {
-        _profilePings[updated.name] = previousPing;
-      }
-      _syncMetricsFromProfile(_selectedProfile);
-    });
-    await _persistProfiles();
-    await _persistSelectedProfile();
-    await _persistProfileMetrics();
   }
 
   String _ensureUniqueProfileName(String base, {String? skipName}) {
@@ -1137,30 +1023,18 @@ class _VlessHomePageState extends State<VlessHomePage>
     return _ensureUniqueProfileName('Profile $nextIndex');
   }
 
-  Future<void> _selectProfile(String? name) async {
-    if (name == null) {
-      setState(() {
-        _selectedProfile = null;
-        _syncMetricsFromProfile(null);
-      });
-      await _persistSelectedProfile();
-      return;
-    }
-    VpnProfile? match;
-    for (final profile in _profiles) {
-      if (profile.name == name) {
-        match = profile;
-        break;
-      }
-    }
-    if (match == null) return;
-    final selected = match;
+  /// Выбрать профиль для текущего подключения (из подписки или обычный)
+  Future<void> _selectCurrentProfile(VpnProfile profile) async {
     setState(() {
-      _selectedProfile = selected;
-      _controller.text = selected.uri;
-      _syncMetricsFromProfile(selected);
+      _selectedProfile = profile;
+      _controller.text = profile.uri;
+      _syncMetricsFromProfile(profile);
     });
-    await _persistSelectedProfile();
+    // Для профилей из подписки не сохраняем выбор
+    // Только для постоянных профилей
+    if (_profiles.any((p) => p.name == profile.name)) {
+      await _persistSelectedProfile();
+    }
   }
 
   Future<void> _start() async {
@@ -1264,7 +1138,6 @@ class _VlessHomePageState extends State<VlessHomePage>
     super.dispose();
   }
 
-  @override
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
@@ -1915,135 +1788,20 @@ class _VlessHomePageState extends State<VlessHomePage>
                 child: const Text('Добавить профиль'),
               ),
             ] else ...[
-              DropdownButtonFormField<String>(
-                initialValue: _selectedProfile?.name,
-                decoration: const InputDecoration(labelText: 'Текущий профиль'),
-                items: _profiles
-                    .map(
-                      (profile) => DropdownMenuItem(
-                        value: profile.name,
-                        child: Text(
-                          profile.name,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    )
-                    .toList(),
-                onChanged: _isRunning ? null : (value) => _selectProfile(value),
-              ),
-              const SizedBox(height: 16),
+              // Интегрированный список профилей и подписок
               SizedBox(
-                height: 260,
-                child: Scrollbar(
-                  thumbVisibility: true,
-                  child: ListView.builder(
-                    itemCount: _profiles.length,
-                    itemBuilder: (context, index) {
-                      final profile = _profiles[index];
-                      final isSelected = _selectedProfile?.name == profile.name;
-                      final ping = _profilePings[profile.name];
-                      final pingLabel = ping != null
-                          ? '$ping мс'
-                          : 'нет данных';
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          color: isSelected
-                              ? theme.colorScheme.primary.withOpacity(0.12)
-                              : theme.colorScheme.surfaceContainerHighest
-                                    .withOpacity(0.25),
-                          border: Border.all(
-                            color: isSelected
-                                ? theme.colorScheme.primary
-                                : theme.colorScheme.outlineVariant.withOpacity(
-                                    0.4,
-                                  ),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          profile.name,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                      Text(
-                                        pingLabel,
-                                        style: theme.textTheme.bodySmall,
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Row(
-                                    children: [
-                                      FilledButton.tonal(
-                                        onPressed: _isRunning
-                                            ? null
-                                            : () =>
-                                                  _selectProfile(profile.name),
-                                        style: FilledButton.styleFrom(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 14,
-                                            vertical: 8,
-                                          ),
-                                          backgroundColor: isSelected
-                                              ? theme.colorScheme.primary
-                                              : null,
-                                          foregroundColor: isSelected
-                                              ? Colors.white
-                                              : null,
-                                        ),
-                                        child: const Text('Выбрать'),
-                                      ),
-                                      if (isSelected)
-                                        Padding(
-                                          padding: const EdgeInsets.only(
-                                            left: 8,
-                                          ),
-                                          child: Text(
-                                            _isRunning
-                                                ? '✓ Активен'
-                                                : '✓ Выбран',
-                                            style: theme.textTheme.bodySmall
-                                                ?.copyWith(
-                                                  color:
-                                                      theme.colorScheme.primary,
-                                                ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Редактировать',
-                              icon: const Icon(Icons.edit_outlined, size: 18),
-                              onPressed: () => _showEditProfileDialog(profile),
-                            ),
-                            IconButton(
-                              tooltip: 'Удалить',
-                              icon: const Icon(Icons.delete_outline, size: 18),
-                              onPressed: () =>
-                                  _removeProfileByName(profile.name),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
+                height: 400,
+                child: ProfileListView(
+                  profiles: _profiles,
+                  selectedProfile: _selectedProfile,
+                  onProfileSelected: (profile) {
+                    if (!_isRunning) {
+                      _selectCurrentProfile(profile);
+                    }
+                  },
+                  onDeleteProfile: (profile) {
+                    _removeProfileByName(profile.name);
+                  },
                 ),
               ),
               const SizedBox(height: 16),
@@ -2580,6 +2338,14 @@ class _VlessHomePageState extends State<VlessHomePage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Row(
+            children: [
+              Text('Проверено: $completed / $total'),
+              const SizedBox(width: 12),
+              if (running) const Text('Выполняется...', style: TextStyle(color: Colors.orange)),
+            ],
+          ),
+          const SizedBox(height: 8),
           Wrap(
             spacing: 12,
             runSpacing: 8,
@@ -2636,17 +2402,6 @@ class _VlessHomePageState extends State<VlessHomePage>
     );
   }
 
-  String _describeSplitMode([String? value]) {
-    final mode = value ?? _splitMode;
-    switch (mode) {
-      case 'whitelist':
-        return 'Белый список: через VPN только указанные';
-      case 'blacklist':
-        return 'Чёрный список: без VPN только указанные';
-      default:
-        return 'Неизвестный режим';
-    }
-  }
 }
 
 class _SplitEntryDialog extends StatefulWidget {

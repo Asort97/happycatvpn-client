@@ -24,14 +24,15 @@ String generateSingBoxConfig(
   final isReality = security == 'reality';
   final useTls = (security == 'tls' || isReality);
   final serverName = p['sni'] ?? p['host'] ?? link.host;
-  final alpn = p['alpn'] != null ? p['alpn']!.split(',') : [];
+  final alpn = p['alpn'] != null
+      ? p['alpn']!.split(',')
+      : (useTls ? <String>['h2', 'http/1.1'] : <String>[]);
   final flow = p['flow'];
   final fingerprint = p['fp'] ?? 'chrome';
   final path = p['path'];
   final realityPublicKey = p['pbk'];
   final realityShortId = p['sid'];
   final packetEncoding = p['packetEncoding'] ?? p['packet'];
-  // sing-box не принимает поле spider_x (spx) в текущей версии — игнорируем
 
   final vpnTag = link.tag ?? 'vless-out';
 
@@ -41,7 +42,8 @@ String generateSingBoxConfig(
     'server': link.host,
     'server_port': link.port,
     'uuid': link.uuid,
-    'domain_strategy': 'ipv4_only',
+    // sing-box 1.12+: use domain_resolver instead of deprecated domain_strategy
+    'domain_resolver': 'dns-remote',
   };
 
   if (flow != null && flow.isNotEmpty) {
@@ -95,23 +97,32 @@ String generateSingBoxConfig(
       : const <Map<String, dynamic>>[];
 
   final config = {
-    'log': {'level': 'info', 'timestamp': true},
+    'log': {
+      'level': 'debug',
+      'timestamp': true,
+      'output': 'stderr',
+    },
     'dns': {
       'servers': [
         {
+          // Avoid DNS loopback with TUN by sending DNS traffic via direct.
           'type': 'udp',
           'tag': 'dns-remote',
           'server': '8.8.8.8',
           'server_port': 53,
         },
         {
-          'type': 'local',
-          'tag': 'dns-local',
+          'type': 'udp',
+          'tag': 'dns-backup',
+          'server': '1.1.1.1',
+          'server_port': 53,
         },
       ],
       'final': 'dns-remote',
       'strategy': 'prefer_ipv4',
-      'independent_cache': false,
+      'independent_cache': true,
+      'disable_cache': false,
+      'disable_expire': false,
     },
     'inbounds': [
       {
@@ -122,7 +133,15 @@ String generateSingBoxConfig(
         'mtu': 1500,
         'address': addresses ?? const ['172.19.0.1/30'],
         'auto_route': true,
-        'strict_route': false,
+        // Windows: recommended to prevent multihomed DNS leaks and enforce routing.
+        'strict_route': true,
+        // Ensure both IPv4 and IPv6 default routes are captured.
+        'route_address': const [
+          '0.0.0.0/1',
+          '128.0.0.0/1',
+          '::/1',
+          '8000::/1',
+        ],
         'sniff': true,
         'sniff_override_destination': false,
       },
