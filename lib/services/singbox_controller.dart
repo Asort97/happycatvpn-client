@@ -10,6 +10,7 @@ import 'wintun_manager.dart';
 import '../services/smart_route_engine.dart';
 import '../vless/config_generator.dart';
 import '../vless/vless_parser.dart';
+import 'dpi_evasion_config.dart';
 
 class SingBoxStartResult {
   final bool success;
@@ -88,6 +89,7 @@ class SingBoxController {
     required String rawUri,
     required SplitTunnelConfig splitConfig,
     SmartRouteEngine? smartRouteEngine,
+    DpiEvasionConfig dpiEvasionConfig = DpiEvasionConfig.balanced,
     void Function(String status)? onStatus,
     void Function(String log)? onLog,
   }) async {
@@ -171,6 +173,7 @@ class SingBoxController {
       autoDetectInterface: !Platform.isAndroid,
       smartRouting: splitConfig.smartRouting,
       smartDomains: splitConfig.smartDomains,
+      dpiEvasionConfig: dpiEvasionConfig,
     );
     _generatedConfig = jsonConfig;
     _configFile = null;

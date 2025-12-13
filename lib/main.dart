@@ -17,6 +17,8 @@ import 'models/connectivity_test.dart';
 import 'models/vpn_subscription.dart';
 import 'services/connectivity_targets.dart';
 import 'services/connectivity_tester.dart';
+import 'services/dpi_evasion_config.dart';
+import 'services/dpi_evasion_manager.dart';
 import 'services/smart_route_engine.dart';
 import 'services/singbox_controller.dart';
 import 'services/subscription_repository.dart';
@@ -24,6 +26,7 @@ import 'services/subscription_manager.dart';
 import 'models/vpn_profile.dart';
 import 'widgets/profile_list_view.dart';
 import 'widgets/add_profile_dialog.dart';
+import 'widgets/dpi_evasion_widget.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -121,10 +124,13 @@ class _VlessHomePageState extends State<VlessHomePage>
   static const String _profileCounterKey = 'vpn_profile_counter';
   bool _developerMode = false;
   bool _smartRouting = false;
+  static const String _dpiAggressiveKey = 'dpi_evasion_aggressive';
   final SmartRouteEngine _smartRouteEngine = SmartRouteEngine();
   final ConnectivityTester _connectivityTester = ConnectivityTester();
   late final List<ConnectivityTestTarget> _connectivityTargets =
       buildDefaultConnectivityTargets();
+  final DpiEvasionManager _dpiEvasionManager = DpiEvasionManager();
+  DpiEvasionConfig _dpiEvasionConfig = DpiEvasionConfig.balanced;
   final Map<String, ConnectivityTestResult> _connectivityResults = {};
   bool _isConnectivityTesting = false;
   int _connectivityCompleted = 0;
@@ -132,6 +138,8 @@ class _VlessHomePageState extends State<VlessHomePage>
   bool _cancelConnectivity = false;
 
   VlessLink? get _parsed => _singBoxController.parsedLink;
+  VlessLink? get _currentLink =>
+      _parsed ?? parseVlessUri(_controller.text.trim());
   File? get _configFile => _singBoxController.configFile;
   String? get _generatedConfig => _singBoxController.generatedConfig;
   bool get _isDesktopPlatform =>
@@ -328,6 +336,7 @@ class _VlessHomePageState extends State<VlessHomePage>
     bool splitEnabled = prefs.getBool(_splitToggleKey) ?? true;
     _smartRouting = prefs.getBool(_smartRoutingKey) ?? false;
     _developerMode = prefs.getBool('developer_mode') ?? false;
+    final dpiAggressive = prefs.getBool(_dpiAggressiveKey) ?? false;
 
     if (metricsRaw != null && metricsRaw.isNotEmpty) {
       try {
@@ -439,6 +448,9 @@ class _VlessHomePageState extends State<VlessHomePage>
       _selectedProfile = selected;
       _syncMetricsFromProfile(selected);
       _smartRouting = smartRoutingFlag;
+      _dpiEvasionConfig = dpiAggressive
+          ? DpiEvasionConfig.aggressive
+          : DpiEvasionConfig.balanced;
       if (restoredMap != null) {
         for (final entry in _splitConfigs.keys.toList()) {
           final restored = restoredMap[entry];
@@ -595,11 +607,6 @@ class _VlessHomePageState extends State<VlessHomePage>
     await _persistSplitState();
   }
 
-  VlessLink? _currentLink() {
-    if (_parsed != null) return _parsed;
-    return parseVlessUri(_controller.text);
-  }
-
   Future<int?> _measurePing(String host, int port) async {
     const attempts = 4;
     final results = <int>[];
@@ -624,7 +631,7 @@ class _VlessHomePageState extends State<VlessHomePage>
 
   Future<void> _refreshMetrics({bool silent = false}) async {
     if (_pingInProgress) return;
-    final link = _currentLink();
+    final link = _currentLink;
     if (link == null) {
       if (!silent) {
         _showFastSnack('Select a profile with a valid VLESS URI first.');
@@ -1052,6 +1059,7 @@ class _VlessHomePageState extends State<VlessHomePage>
       rawUri: _controller.text,
       splitConfig: _configForConnection,
       smartRouteEngine: _smartRouteEngine,
+      dpiEvasionConfig: _dpiEvasionConfig,
       onStatus: (value) {
         if (!mounted) return;
         setState(() => _status = value);
@@ -1068,6 +1076,7 @@ class _VlessHomePageState extends State<VlessHomePage>
     await _saveUri();
     if (!mounted) return;
     setState(() {});
+    unawaited(_applyDpiEvasionInjector());
     unawaited(_refreshMetrics(silent: true));
   }
 
@@ -1080,8 +1089,36 @@ class _VlessHomePageState extends State<VlessHomePage>
       },
       onLog: (line) => _appendLogs([line]),
     );
+    await _dpiEvasionManager.stopNativeInjector();
     if (!mounted) return;
     setState(() {});
+  }
+
+  Future<void> _applyDpiEvasionInjector() async {
+    if (!_dpiEvasionConfig.enableTtlPhantom) {
+      await _dpiEvasionManager.stopNativeInjector();
+      return;
+    }
+    final link = _currentLink;
+    if (link == null) return;
+    await _dpiEvasionManager.startForHost(link.host, link.port);
+  }
+
+  void _updateDpiConfig(DpiEvasionConfig config) {
+    setState(() => _dpiEvasionConfig = config);
+    unawaited(
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setBool(
+          _dpiAggressiveKey,
+          config.profile == DpiEvasionProfile.aggressive,
+        ),
+      ),
+    );
+    if (_isRunning) {
+      unawaited(_applyDpiEvasionInjector());
+    } else if (!config.enableTtlPhantom) {
+      unawaited(_dpiEvasionManager.stopNativeInjector());
+    }
   }
 
   void _appendLogs(Iterable<String> entries) {
@@ -1135,6 +1172,7 @@ class _VlessHomePageState extends State<VlessHomePage>
       unawaited(_trayManager.destroy());
     }
     unawaited(_singBoxController.dispose());
+    unawaited(_dpiEvasionManager.stopNativeInjector());
     super.dispose();
   }
 
@@ -1912,6 +1950,14 @@ class _VlessHomePageState extends State<VlessHomePage>
                   },
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            DpiEvasionWidget(
+              manager: _dpiEvasionManager,
+              config: _dpiEvasionConfig,
+              serverHost: _currentLink?.host,
+              serverPort: _currentLink?.port,
+              onConfigChanged: _updateDpiConfig,
             ),
           ],
         ),

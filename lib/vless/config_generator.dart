@@ -2,6 +2,7 @@
 import 'vless_parser.dart';
 
 import '../models/split_tunnel_config.dart';
+import '../services/dpi_evasion_config.dart';
 
 /// Генерация конфигурационного JSON для sing-box с TUN (wintun)
 /// Полноценный VPN туннель для всего устройства без SOCKS прокси
@@ -17,6 +18,7 @@ String generateSingBoxConfig(
   bool autoDetectInterface = true,
   bool smartRouting = false,
   List<String> smartDomains = const <String>[],
+  DpiEvasionConfig dpiEvasionConfig = DpiEvasionConfig.balanced,
 }) {
   final p = link.params;
   final transportType = p['type']; // например ws, tcp, grpc, h2
@@ -86,6 +88,9 @@ String generateSingBoxConfig(
   final transport = _buildTransport(transportType, link, p, path, serverName);
   if (transport != null) {
     outbound['transport'] = transport;
+  }
+  if (dpiEvasionConfig.enableFragmentation && useTls) {
+    _applyFragmentation(outbound, transportType);
   }
 
   final appRules = enableApplicationRules
@@ -172,6 +177,39 @@ String generateSingBoxConfig(
     },
   };
   return const JsonEncoder.withIndent('  ').convert(config);
+}
+
+void _applyFragmentation(
+  Map<String, dynamic> outbound,
+  String? transportType,
+) {
+  const fragment = {
+    'packets': 'tlshello',
+    'length': '1-5',
+    'interval': '10-20',
+  };
+
+  final existingTransport = outbound['transport'];
+  if (existingTransport is Map<String, dynamic>) {
+    final type = existingTransport['type'];
+    if (type is String && type.isNotEmpty) {
+      outbound['transport'] = <String, dynamic>{
+        ...existingTransport,
+        'fragment': fragment,
+      };
+    }
+    return;
+  }
+
+  final normalizedType = transportType?.trim().toLowerCase();
+  if (normalizedType != null &&
+      normalizedType.isNotEmpty &&
+      normalizedType != 'tcp') {
+    outbound['transport'] = <String, dynamic>{
+      'type': normalizedType,
+      'fragment': fragment,
+    };
+  }
 }
 
 Map<String, dynamic> _optimizeOutbound(
