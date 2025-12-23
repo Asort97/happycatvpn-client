@@ -145,12 +145,13 @@ class _ProfileListViewState extends State<ProfileListView> {
     final children = <Widget>[];
 
     if (widget.profiles.isNotEmpty) {
-      children.add(_buildSectionHeader('Профили подключения'));
+      // Standalone VLESS keys imported manually
+      children.add(_buildSectionHeader('Конфигурации'));
       children.addAll(_buildRegularKeys());
     }
 
     if (_subscriptions.isNotEmpty) {
-      children.add(_buildSectionHeader('Конфигурации'));
+      children.add(_buildSectionHeader('Подписки'));
       children.addAll(_buildSubscriptions());
     }
 
