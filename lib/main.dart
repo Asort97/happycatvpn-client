@@ -120,6 +120,7 @@ class _VlessHomePageState extends State<VlessHomePage>
   final Map<String, int> _profilePings = {};
   final List<String> _logLines = <String>[];
   int _profileNameCounter = 0;
+  int _subscriptionsRefreshToken = 0;
   static const String _profileMetricsKey = 'vpn_profile_metrics';
   static const String _profileCounterKey = 'vpn_profile_counter';
   bool _developerMode = false;
@@ -894,6 +895,12 @@ class _VlessHomePageState extends State<VlessHomePage>
     _controller.text = trimmedUri;
     await _persistProfiles();
     await _persistSelectedProfile();
+
+    // UX: don't mix standalone keys with subscriptions.
+    final repository = SubscriptionRepository();
+    await repository.clearAllSubscriptions();
+    if (!mounted) return;
+    setState(() => _subscriptionsRefreshToken += 1);
   }
 
   Future<void> _removeProfileByName(String name) async {
@@ -910,6 +917,10 @@ class _VlessHomePageState extends State<VlessHomePage>
     await _persistProfiles();
     await _persistSelectedProfile();
     await _persistProfileMetrics();
+    if (_profiles.isEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('vless_uri');
+    }
   }
 
   Future<void> _showProfileDialog() async {
@@ -937,41 +948,58 @@ class _VlessHomePageState extends State<VlessHomePage>
   Future<void> _addSubscription(String url, String name) async {
     try {
       final manager = SubscriptionService();
-
-      // Загружаем профили из подписки
       final profiles = await manager.fetchSubscription(url);
       if (profiles.isEmpty) {
-        throw 'В подписке не найдено профилей';
+        throw 'Subscription did not return profiles';
       }
 
-      // Создаём подписку
       final subscription = VpnSubscription(
         name: name,
         url: url,
         profiles: profiles,
       );
 
-      // Добавляем в репозиторий
       final repository = SubscriptionRepository();
       final added = await repository.addSubscription(subscription);
 
       if (added) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Подписка добавлена')),
+          const SnackBar(content: Text('Subscription added')),
         );
-        setState(() {
-          // Перезагружаем UI
-        });
+        await _clearAllProfilesForSubscriptionMode();
+        await _reloadSubscriptions();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Подписка с этим URL уже существует')),
+          const SnackBar(content: Text('Failed to add: duplicate URL')),
         );
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
+        SnackBar(content: Text('Error: $e')),
       );
     }
+  }
+
+  Future<void> _reloadSubscriptions() async {
+    if (!mounted) return;
+    setState(() => _subscriptionsRefreshToken += 1);
+  }
+
+  Future<void> _clearAllProfilesForSubscriptionMode() async {
+    if (!mounted) return;
+    setState(() {
+      _profiles = [];
+      _selectedProfile = null;
+      _profilePings.clear();
+      _pingMs = null;
+      _controller.text = '';
+      _syncMetricsFromProfile(null);
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('vless_uri');
+    await _persistProfiles();
+    await _persistSelectedProfile();
+    await _persistProfileMetrics();
   }
 
   String _ensureUniqueProfileName(String base, {String? skipName}) {
@@ -1146,10 +1174,22 @@ class _VlessHomePageState extends State<VlessHomePage>
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Конфигурация sing-box'),
-        content: SingleChildScrollView(
-          child: SelectableText(
-            _generatedConfig ?? '',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+        insetPadding: EdgeInsets.symmetric(
+          horizontal: (Platform.isAndroid || Platform.isIOS) ? 12 : 40,
+          vertical: 24,
+        ),
+        content: SizedBox(
+          width: math.min(MediaQuery.of(ctx).size.width, 900),
+          child: Scrollbar(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  _generatedConfig ?? '',
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                ),
+              ),
+            ),
           ),
         ),
         actions: [
@@ -1594,6 +1634,7 @@ class _VlessHomePageState extends State<VlessHomePage>
   Widget _buildStatusHero(BuildContext context, bool isWide) {
     final scheme = Theme.of(context).colorScheme;
     final isRunning = _isRunning;
+    final isMobile = Platform.isAndroid || Platform.isIOS;
     final gradient = isRunning
         ? [const Color(0xFFFF1B2D), const Color(0xFF51030F)]
         : [const Color(0xFF1A1B22), const Color(0xFF08090F)];
@@ -1612,7 +1653,7 @@ class _VlessHomePageState extends State<VlessHomePage>
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 640;
-        final actions = Wrap(
+        final labeledActions = Wrap(
           spacing: 10,
           runSpacing: 8,
           children: [
@@ -1640,6 +1681,45 @@ class _VlessHomePageState extends State<VlessHomePage>
           ],
         );
 
+        final compactActions = isMobile || compact;
+        final actions = compactActions
+            ? Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  IconButton(
+                    onPressed: canRefreshMetrics
+                        ? () => _refreshMetrics()
+                        : null,
+                    tooltip: 'Обновить',
+                    icon: Icon(
+                      _pingInProgress
+                          ? Icons.timelapse
+                          : Icons.refresh_outlined,
+                      color: Colors.white,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _copyStatusToClipboard,
+                    tooltip: 'Копировать',
+                    icon: const Icon(
+                      Icons.copy_all_outlined,
+                      color: Colors.white,
+                    ),
+                  ),
+                  if (_generatedConfig != null)
+                    IconButton(
+                      onPressed: () => _showConfigDialog(context),
+                      tooltip: 'Конфиг',
+                      icon: const Icon(
+                        Icons.visibility_outlined,
+                        color: Colors.white,
+                      ),
+                    ),
+                ],
+              )
+            : labeledActions;
+
         final statusTexts = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1665,19 +1745,18 @@ class _VlessHomePageState extends State<VlessHomePage>
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(icon, size: 46, color: Colors.white),
+                Icon(icon, size: compactActions ? 36 : 46, color: Colors.white),
                 const SizedBox(width: 12),
                 Expanded(child: statusTexts),
               ],
             ),
-            const SizedBox(height: 12),
-            actions,
+            if (!compactActions) ...[const SizedBox(height: 12), actions],
           ],
         );
 
         return AnimatedContainer(
           duration: const Duration(milliseconds: 300),
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(compactActions ? 16 : 28),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
             gradient: LinearGradient(
@@ -1701,10 +1780,14 @@ class _VlessHomePageState extends State<VlessHomePage>
               Center(
                 child: SizedBox(
                   width: isWide ? 260 : double.infinity,
+                  // Allow start when a profile is selected or the field is non-empty (subscriptions fill the controller).
                   child: ElevatedButton.icon(
                     onPressed: _isRunning
                         ? _stop
-                        : (_profiles.isNotEmpty ? _start : null),
+                        : ((_selectedProfile != null ||
+                                _controller.text.trim().isNotEmpty)
+                            ? _start
+                            : null),
                     style: ElevatedButton.styleFrom(
                       minimumSize: const Size.fromHeight(60),
                       backgroundColor: _isRunning
@@ -1730,7 +1813,7 @@ class _VlessHomePageState extends State<VlessHomePage>
                   ),
                 ),
               ),
-              if (compact) ...[const SizedBox(height: 8), actions],
+              if (compactActions) ...[const SizedBox(height: 8), actions],
               const SizedBox(height: 20),
               Wrap(
                 spacing: 16,
@@ -1786,8 +1869,6 @@ class _VlessHomePageState extends State<VlessHomePage>
 
   Widget _buildProfileCard(BuildContext context) {
     final theme = Theme.of(context);
-    final hasProfiles = _profiles.isNotEmpty;
-
     // ...existing code...
     final profileCard = Card(
       color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.25),
@@ -1815,48 +1896,36 @@ class _VlessHomePageState extends State<VlessHomePage>
               ],
             ),
             const SizedBox(height: 16),
-            if (!hasProfiles) ...[
-              Text(
-                'Нет сохранённых профилей. Добавьте первый профиль.',
-                style: theme.textTheme.bodyMedium,
+            SizedBox(
+              height: 400,
+              child: ProfileListView(
+                profiles: _profiles,
+                selectedProfile: _selectedProfile,
+                subscriptionsRefreshToken: _subscriptionsRefreshToken,
+                onProfileSelected: (profile) {
+                  if (!_isRunning) {
+                    _selectCurrentProfile(profile);
+                  }
+                },
+                onDeleteProfile: (profile) {
+                  _removeProfileByName(profile.name);
+                },
               ),
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: _showProfileDialog,
-                child: const Text('Добавить профиль'),
-              ),
-            ] else ...[
-              // Интегрированный список профилей и подписок
-              SizedBox(
-                height: 400,
-                child: ProfileListView(
-                  profiles: _profiles,
-                  selectedProfile: _selectedProfile,
-                  onProfileSelected: (profile) {
-                    if (!_isRunning) {
-                      _selectCurrentProfile(profile);
-                    }
-                  },
-                  onDeleteProfile: (profile) {
-                    _removeProfileByName(profile.name);
-                  },
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                TextButton.icon(
+                  onPressed: _generatedConfig != null
+                      ? () => _showConfigDialog(context)
+                      : null,
+                  icon: const Icon(Icons.receipt_long),
+                  label: const Text('Show config'),
                 ),
-              ),
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  TextButton.icon(
-                    onPressed: _generatedConfig != null
-                        ? () => _showConfigDialog(context)
-                        : null,
-                    icon: const Icon(Icons.receipt_long),
-                    label: const Text('Показать конфиг'),
-                  ),
-                ],
-              ),
-            ],
+              ],
+            ),
           ],
         ),
       ),
@@ -1874,9 +1943,12 @@ class _VlessHomePageState extends State<VlessHomePage>
               children: [
                 Icon(Icons.call_split, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
-                const Text(
-                  'Раздельное туннелирование',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                const Expanded(
+                  child: Text(
+                    'Раздельное туннелирование',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
             ),
@@ -2388,7 +2460,11 @@ class _VlessHomePageState extends State<VlessHomePage>
             children: [
               Text('Проверено: $completed / $total'),
               const SizedBox(width: 12),
-              if (running) const Text('Выполняется...', style: TextStyle(color: Colors.orange)),
+              if (running)
+                const Text(
+                  'Выполняется...',
+                  style: TextStyle(color: Colors.orange),
+                ),
             ],
           ),
           const SizedBox(height: 8),
@@ -2447,7 +2523,6 @@ class _VlessHomePageState extends State<VlessHomePage>
       ),
     );
   }
-
 }
 
 class _SplitEntryDialog extends StatefulWidget {

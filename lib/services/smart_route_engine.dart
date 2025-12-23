@@ -4,6 +4,12 @@ import 'cache_repository.dart';
 
 enum RouteDecision { bypassVpn, useVpn }
 
+class SmartTlsFragmentOptions {
+  const SmartTlsFragmentOptions({this.fallbackDelay});
+
+  final Duration? fallbackDelay;
+}
+
 /// Lightweight smart routing engine based on Russian TLDs and a curated list of services.
 ///
 /// Intentionally avoids IP/ASN heuristics to prevent false positives from anycast CDNs.
@@ -142,12 +148,34 @@ class SmartRouteEngine {
     ];
   }
 
+  static Map<String, dynamic> buildTlsFragmentRouteOptionsRule({
+    SmartTlsFragmentOptions options = const SmartTlsFragmentOptions(),
+    bool tcpOnly = true,
+  }) {
+    return {
+      if (tcpOnly) 'network': 'tcp',
+      'action': 'route-options',
+      'tls_fragment': true,
+      if (options.fallbackDelay != null)
+        'tls_fragment_fallback_delay': _formatSingBoxDuration(
+          options.fallbackDelay!,
+        ),
+    };
+  }
+
   List<String> exportLegacyRuleEntries() {
     return [...ruTlds.map((tld) => '.$tld'), ...russianServices];
   }
 
   static String _normalizeDomain(String domain) {
     return domain.trim().toLowerCase().replaceAll(RegExp(r'\.+$'), '');
+  }
+
+  static String _formatSingBoxDuration(Duration value) {
+    if (value.inMicroseconds == 0) return '0s';
+    if (value.inMilliseconds < 1000) return '${value.inMilliseconds}ms';
+    if (value.inMilliseconds % 1000 == 0) return '${value.inSeconds}s';
+    return '${value.inMilliseconds}ms';
   }
 }
 

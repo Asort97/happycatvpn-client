@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'vless_parser.dart';
 
 import '../models/split_tunnel_config.dart';
@@ -18,6 +18,7 @@ String generateSingBoxConfig(
   bool autoDetectInterface = true,
   bool smartRouting = false,
   List<String> smartDomains = const <String>[],
+  List<Map<String, dynamic>> extraRouteRules = const <Map<String, dynamic>>[],
   DpiEvasionConfig dpiEvasionConfig = DpiEvasionConfig.balanced,
 }) {
   final p = link.params;
@@ -102,11 +103,7 @@ String generateSingBoxConfig(
       : const <Map<String, dynamic>>[];
 
   final config = {
-    'log': {
-      'level': 'debug',
-      'timestamp': true,
-      'output': 'stderr',
-    },
+    'log': {'level': 'debug', 'timestamp': true, 'output': 'stderr'},
     'dns': {
       'servers': [
         {
@@ -141,12 +138,7 @@ String generateSingBoxConfig(
         // Windows: recommended to prevent multihomed DNS leaks and enforce routing.
         'strict_route': true,
         // Ensure both IPv4 and IPv6 default routes are captured.
-        'route_address': const [
-          '0.0.0.0/1',
-          '128.0.0.0/1',
-          '::/1',
-          '8000::/1',
-        ],
+        'route_address': const ['0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1'],
         'sniff': true,
         'sniff_override_destination': false,
       },
@@ -165,11 +157,9 @@ String generateSingBoxConfig(
       ),
       'rules': [
         // Hijack DNS queries using rule action instead of legacy dns outbound
-        {
-          'protocol': 'dns',
-          'action': 'hijack-dns',
-        },
+        {'protocol': 'dns', 'action': 'hijack-dns'},
 
+        ...extraRouteRules,
         ...smartRules,
         ..._buildRouteRules(splitConfig, vpnTag),
         ...appRules,
@@ -179,10 +169,7 @@ String generateSingBoxConfig(
   return const JsonEncoder.withIndent('  ').convert(config);
 }
 
-void _applyFragmentation(
-  Map<String, dynamic> outbound,
-  String? transportType,
-) {
+void _applyFragmentation(Map<String, dynamic> outbound, String? transportType) {
   const fragment = {
     'packets': 'tlshello',
     'length': '1-5',

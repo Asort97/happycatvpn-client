@@ -19,6 +19,7 @@ class SubscriptionRepository {
   /// Получить все подписки
   Future<List<VpnSubscription>> getAllSubscriptions() async {
     await initialize();
+    await _prefs.reload();
     final stored = _prefs.getStringList(_storageKey) ?? [];
     return stored
         .map((json) {
@@ -48,10 +49,17 @@ class SubscriptionRepository {
     try {
       final all = await getAllSubscriptions();
       // Проверяем что такая подписка ещё не добавлена
-      if (all.any((sub) => sub.url == subscription.url)) {
-        return false;
+      final normalizedUrl = subscription.url.trim();
+      if (normalizedUrl.isEmpty) return false;
+      final existingIndex = all.indexWhere(
+        (sub) => sub.url.trim() == normalizedUrl,
+      );
+      if (existingIndex != -1) {
+        final existing = all[existingIndex];
+        all[existingIndex] = subscription.copyWith(id: existing.id);
+      } else {
+        all.add(subscription);
       }
-      all.add(subscription);
       await _saveAll(all);
       return true;
     } catch (_) {
@@ -75,6 +83,45 @@ class SubscriptionRepository {
   }
 
   /// Удалить подписку
+  /// Add or replace a subscription matching by URL (recovers from stale/ghost entries).
+  Future<bool> upsertSubscriptionByUrl(VpnSubscription subscription) async {
+    await initialize();
+    try {
+      final normalizedUrl = subscription.url.trim();
+      if (normalizedUrl.isEmpty) return false;
+
+      final all = await getAllSubscriptions();
+      final index = all.indexWhere((sub) => sub.url.trim() == normalizedUrl);
+      if (index == -1) {
+        all.add(subscription);
+        await _saveAll(all);
+        return true;
+      }
+
+      final existing = all[index];
+      all[index] = subscription.copyWith(id: existing.id);
+      await _saveAll(all);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> deleteSubscriptionByUrl(String url) async {
+    await initialize();
+    try {
+      final normalizedUrl = url.trim();
+      if (normalizedUrl.isEmpty) return false;
+
+      final all = await getAllSubscriptions();
+      all.removeWhere((sub) => sub.url.trim() == normalizedUrl);
+      await _saveAll(all);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> deleteSubscription(String id) async {
     await initialize();
     try {
@@ -87,6 +134,11 @@ class SubscriptionRepository {
       if (selected == id) {
         await clearSelectedSubscription();
       }
+      if (selected != null && selected.isNotEmpty) {
+        if (await getSubscription(selected) == null) {
+          await clearSelectedSubscription();
+        }
+      }
 
       return true;
     } catch (_) {
@@ -97,6 +149,7 @@ class SubscriptionRepository {
   /// Получить выбранную подписку (ID)
   Future<String?> getSelectedSubscriptionId() async {
     await initialize();
+    await _prefs.reload();
     return _prefs.getString(_selectedSubscriptionKey);
   }
 
@@ -130,8 +183,21 @@ class SubscriptionRepository {
   }
 
   /// Вспомогательный метод для сохранения всех подписок
+  Future<bool> clearAllSubscriptions() async {
+    await initialize();
+    try {
+      await _prefs.remove(_storageKey);
+      await _prefs.remove(_selectedSubscriptionKey);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _saveAll(List<VpnSubscription> subscriptions) async {
-    final jsonList = subscriptions.map((sub) => jsonEncode(sub.toJson())).toList();
+    final jsonList = subscriptions
+        .map((sub) => jsonEncode(sub.toJson()))
+        .toList();
     await _prefs.setStringList(_storageKey, jsonList);
   }
 }

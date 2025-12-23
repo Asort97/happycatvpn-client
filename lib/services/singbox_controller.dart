@@ -161,6 +161,24 @@ class SingBoxController {
         : <String>[];
 
     _notifyStatus('Генерация конфига');
+    final extraRouteRules = <Map<String, dynamic>>[];
+    final useSmartEngineRules =
+        smartRouteEngine != null && splitConfig.smartRouting;
+    if (useSmartEngineRules) {
+      extraRouteRules.addAll(
+        smartRouteEngine.buildRouteRules(outboundTag: 'direct'),
+      );
+    }
+    if (dpiEvasionConfig.enableTlsFragment) {
+      extraRouteRules.add(
+        SmartRouteEngine.buildTlsFragmentRouteOptionsRule(
+          options: SmartTlsFragmentOptions(
+            fallbackDelay: dpiEvasionConfig.tlsFragmentFallbackDelay,
+          ),
+        ),
+      );
+    }
+
     final jsonConfig = generateSingBoxConfig(
       parsed,
       splitConfig,
@@ -171,8 +189,11 @@ class SingBoxController {
       enableApplicationRules: Platform.isWindows,
       hasAndroidPackageRules: Platform.isAndroid && androidPackages.isNotEmpty,
       autoDetectInterface: !Platform.isAndroid,
-      smartRouting: splitConfig.smartRouting,
-      smartDomains: splitConfig.smartDomains,
+      smartRouting: splitConfig.smartRouting && !useSmartEngineRules,
+      smartDomains: splitConfig.smartRouting && !useSmartEngineRules
+          ? splitConfig.smartDomains
+          : const <String>[],
+      extraRouteRules: extraRouteRules,
       dpiEvasionConfig: dpiEvasionConfig,
     );
     _generatedConfig = jsonConfig;
@@ -393,9 +414,9 @@ class SingBoxController {
 
   Future<void> _preloadDns(String domain) async {
     try {
-      await InternetAddress.lookup(domain).timeout(
-        const Duration(milliseconds: 800),
-      );
+      await InternetAddress.lookup(
+        domain,
+      ).timeout(const Duration(milliseconds: 800));
     } catch (_) {
       // Тихое игнорирование ошибок DNS-прогрева.
     }

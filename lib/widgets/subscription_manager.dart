@@ -35,9 +35,9 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
         _selectedSubscription = selected;
       });
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка загрузки подписок: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Ошибка загрузки подписок: $e')));
     } finally {
       setState(() => _isLoading = false);
     }
@@ -76,16 +76,16 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
       final added = await _repository.addSubscription(subscription);
       if (added) {
         await _loadSubscriptions();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Подписка добавлена')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Подписка добавлена')));
       } else {
         throw 'Не удалось добавить подписку';
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
     } finally {
       setState(() => _isLoading = false);
     }
@@ -109,14 +109,14 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
       final success = await _repository.updateSubscription(updated);
       if (success) {
         await _loadSubscriptions();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Подписка обновлена')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Подписка обновлена')));
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка обновления: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Ошибка обновления: $e')));
     } finally {
       setState(() => _isLoading = false);
     }
@@ -127,7 +127,9 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Удалить подписку?'),
-        content: Text('Подписка "${subscription.name}" будет удалена безвозвратно'),
+        content: Text(
+          'Подписка "${subscription.name}" будет удалена безвозвратно',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -145,18 +147,22 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
 
     try {
       await _repository.deleteSubscription(subscription.id);
+      await _repository.deleteSubscriptionByUrl(subscription.url);
       await _loadSubscriptions();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Подписка удалена')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Подписка удалена')));
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
     }
   }
 
-  Future<void> _selectProfile(VpnSubscription subscription, int profileIndex) async {
+  Future<void> _selectProfile(
+    VpnSubscription subscription,
+    int profileIndex,
+  ) async {
     try {
       final updated = subscription.copyWith(selectedIndex: profileIndex);
       await _repository.updateSubscription(updated);
@@ -167,9 +173,9 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
         SnackBar(content: Text('Профиль "${updated.selectedProfile}" выбран')),
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
     }
   }
 
@@ -189,115 +195,118 @@ class _SubscriptionManagerState extends State<SubscriptionManager> {
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : _subscriptions.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.cloud_off,
-                        size: 64,
-                        color: Colors.grey[400],
-                      ),
-                      const SizedBox(height: 16),
-                      const Text('Нет подписок'),
-                      const SizedBox(height: 16),
-                      ElevatedButton.icon(
-                        onPressed: _addSubscription,
-                        icon: const Icon(Icons.add),
-                        label: const Text('Добавить подписку'),
-                      ),
-                    ],
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.cloud_off, size: 64, color: Colors.grey[400]),
+                  const SizedBox(height: 16),
+                  const Text('Нет подписок'),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: _addSubscription,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Добавить подписку'),
                   ),
-                )
-              : ListView.builder(
-                  itemCount: _subscriptions.length,
-                  itemBuilder: (context, index) {
-                    final subscription = _subscriptions[index];
-                    final isSelected = _selectedSubscription?.id == subscription.id;
+                ],
+              ),
+            )
+          : ListView.builder(
+              itemCount: _subscriptions.length,
+              itemBuilder: (context, index) {
+                final subscription = _subscriptions[index];
+                final isSelected = _selectedSubscription?.id == subscription.id;
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      child: ExpansionTile(
-                        leading: Icon(
-                          isSelected ? Icons.check_circle : Icons.cloud_download,
-                          color: isSelected ? Colors.green : Colors.grey,
-                        ),
-                        title: Text(subscription.name),
-                        subtitle: Text(
-                          'Профилей: ${subscription.profileCount}',
-                        ),
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'URL: ${subscription.url}',
-                                  style: const TextStyle(fontSize: 12),
+                return Card(
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: ExpansionTile(
+                    leading: Icon(
+                      isSelected ? Icons.check_circle : Icons.cloud_download,
+                      color: isSelected ? Colors.green : Colors.grey,
+                    ),
+                    title: Text(subscription.name),
+                    subtitle: Text('Профилей: ${subscription.profileCount}'),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'URL: ${subscription.url}',
+                              style: const TextStyle(fontSize: 12),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Обновлено: ${subscription.formattedLastUpdate}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Выберите профиль:',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 8),
+                            ...List.generate(
+                              subscription.profiles.length,
+                              (i) => ListTile(
+                                leading: Radio(
+                                  value: i,
+                                  groupValue: subscription.selectedIndex,
+                                  onChanged: (_) =>
+                                      _selectProfile(subscription, i),
+                                ),
+                                title: Text(
+                                  subscription.profiles[i],
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 12),
                                 ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Обновлено: ${subscription.formattedLastUpdate}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey[600],
+                                trailing: subscription.selectedIndex == i
+                                    ? const Icon(
+                                        Icons.check,
+                                        color: Colors.green,
+                                      )
+                                    : null,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                ElevatedButton.icon(
+                                  onPressed: () =>
+                                      _refreshSubscription(subscription),
+                                  icon: const Icon(Icons.refresh),
+                                  label: const Text('Обновить'),
+                                ),
+                                ElevatedButton.icon(
+                                  onPressed: () =>
+                                      _deleteSubscription(subscription),
+                                  icon: const Icon(Icons.delete),
+                                  label: const Text('Удалить'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.red[400],
                                   ),
-                                ),
-                                const SizedBox(height: 12),
-                                const Text(
-                                  'Выберите профиль:',
-                                  style: TextStyle(fontWeight: FontWeight.bold),
-                                ),
-                                const SizedBox(height: 8),
-                                ...List.generate(
-                                  subscription.profiles.length,
-                                  (i) => ListTile(
-                                    leading: Radio(
-                                      value: i,
-                                      groupValue: subscription.selectedIndex,
-                                      onChanged: (_) => _selectProfile(subscription, i),
-                                    ),
-                                    title: Text(
-                                      subscription.profiles[i],
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 12),
-                                    ),
-                                    trailing: subscription.selectedIndex == i
-                                        ? const Icon(Icons.check, color: Colors.green)
-                                        : null,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                                  children: [
-                                    ElevatedButton.icon(
-                                      onPressed: () => _refreshSubscription(subscription),
-                                      icon: const Icon(Icons.refresh),
-                                      label: const Text('Обновить'),
-                                    ),
-                                    ElevatedButton.icon(
-                                      onPressed: () => _deleteSubscription(subscription),
-                                      icon: const Icon(Icons.delete),
-                                      label: const Text('Удалить'),
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: Colors.red[400],
-                                      ),
-                                    ),
-                                  ],
                                 ),
                               ],
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    );
-                  },
-                ),
+                    ],
+                  ),
+                );
+              },
+            ),
     );
   }
 }
@@ -330,7 +339,8 @@ class _AddSubscriptionDialogState extends State<_AddSubscriptionDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final isValid = _urlController.text.isNotEmpty && _nameController.text.isNotEmpty;
+    final isValid =
+        _urlController.text.isNotEmpty && _nameController.text.isNotEmpty;
 
     return AlertDialog(
       title: const Text('Добавить подписку'),
@@ -365,10 +375,10 @@ class _AddSubscriptionDialogState extends State<_AddSubscriptionDialog> {
         ElevatedButton(
           onPressed: isValid
               ? () {
-                  Navigator.pop(
-                    context,
-                    (_urlController.text, _nameController.text),
-                  );
+                  Navigator.pop(context, (
+                    _urlController.text,
+                    _nameController.text,
+                  ));
                 }
               : null,
           child: const Text('Добавить'),
